@@ -1,0 +1,56 @@
+{
+  "app": {
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "C:\\Users\\何金菊\\.ohos\\config\\default_DeepSeekWatch_qZOQE5TCTKm039S2V-EJgNSUuB6PzHwAXhc45uqgYr0=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001BA7AC7A4AA1559C47F5B3FA1860416C9F53546DC178C25DE41E82C270252E4C79EADBBB0E3C0C88",
+          "profile": "C:\\Users\\何金菊\\.ohos\\config\\default_DeepSeekWatch_qZOQE5TCTKm039S2V-EJgNSUuB6PzHwAXhc45uqgYr0=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "C:\\Users\\何金菊\\.ohos\\config\\default_DeepSeekWatch_qZOQE5TCTKm039S2V-EJgNSUuB6PzHwAXhc45uqgYr0=.p12",
+          "storePassword": "0000001B0F7D61E75CA8DD44E3A329DDB0680CD274B75BC2142FB89CDEA01284584AAD9F8D809268306582"
+        }
+      }
+    ],
+    "products": [
+      {
+        "name": "default",
+        "signingConfig": "default",
+        "compatibleSdkVersion": "6.1.0(23)",
+        "targetSdkVersion": "6.1.0(23)",
+        "runtimeOS": "HarmonyOS",
+        "buildOption": {
+          "strictMode": {
+            "caseSensitiveCheck": true,
+            "useNormalizedOHMUrl": true
+          }
+        }
+      }
+    ],
+    "buildModeSet": [
+      {
+        "name": "debug"
+      },
+      {
+        "name": "release"
+      }
+    ]
+  },
+  "modules": [
+    {
+      "name": "entry",
+      "srcPath": "./entry",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    }
+  ]
+}

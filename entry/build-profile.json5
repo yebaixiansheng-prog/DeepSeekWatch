@@ -1,0 +1,23 @@
+{
+  "apiType": "stageMode",
+  "buildOption": {
+    // ★ 原生模块：DeepSeekHashV1 / PoW 搜索的 C++ 实现
+    //   ArkTS 版在手表上只有约 1000~2000 次哈希/秒（一次 PoW 要 20~55 秒），
+    //   同样的算法用 C++ 编译后是毫秒级 —— 这是唯一能真正解决「安全校验慢」的办法。
+    //   （ArkTS 运行时没有 WebAssembly，只能走 NAPI 原生模块。）
+    "externalNativeOptions": {
+      "path": "./src/main/cpp/CMakeLists.txt",
+      "arguments": "",
+      "cppFlags": "-O2",
+      "abiFilters": [
+        "arm64-v8a"
+      ]
+    }
+  },
+  "targets": [
+    {
+      "name": "default",
+      "runtimeOS": "HarmonyOS"
+    }
+  ]
+}

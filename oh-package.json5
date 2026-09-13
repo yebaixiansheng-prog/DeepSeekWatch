@@ -1,0 +1,10 @@
+{
+  "modelVersion": "6.0.0",
+  "name": "deepseekwatch",
+  "version": "1.0.0",
+  "description": "DeepSeek client for HUAWEI WATCH (round wearable)",
+  "main": "index.js",
+  "author": "",
+  "license": "Apache-2.0",
+  "dependencies": {}
+}

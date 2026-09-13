@@ -1,0 +1,9 @@
+{
+  "color": [
+    { "name": "start_window_background", "value": "#000000" },
+    { "name": "ds_bg", "value": "#000000" },
+    { "name": "ds_surface", "value": "#12141A" },
+    { "name": "ds_primary", "value": "#4D6BFE" },
+    { "name": "ds_text", "value": "#E8EAED" }
+  ]
+}
