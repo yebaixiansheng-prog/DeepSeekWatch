@@ -913,6 +913,50 @@ REMOTE=$("$HDC" shell "wc -c < /data/local/tmp/app.hap" | tr -d '\r')
 **按 1→2→3→4 的顺序排查。** 绝大多数问题在第 1、2 层就解决了 ——
 不要一遇到问题就重新编译 HAP（一轮编译 15 秒 + 手表经常掉线，非常浪费时间）。
 
+#### ★ 第 2 层的致命陷阱：验证脚本的"设备指纹"必须与 App 一致
+
+这一层最容易骗自己。写协议验证脚本时，你**必然会硬编码一份请求头**：
+
+```js
+// tools/live-e2e.mjs
+const UA = 'Mozilla/5.0 (…) …';      // ← 手抄的
+const H = { 'User-Agent': UA, 'x-ds-platform': 'web' };
+```
+
+一旦 App 侧的 UA 改了（比如为了绕风控换掉伪造 UA），
+而你**忘了同步这个脚本**，那么：
+
+> **脚本跑通 ≠ App 能跑通。**
+
+因为脚本其实在验证一个**已经不存在的客户端指纹**。
+更糟的是它给出的是"绿色通过"，你会据此认为真机没问题。
+
+**真实案例**：本项目修风控时把 App 的 UA 从
+`… HarmonyOS; HUAWEI WATCH) … Mobile Safari/537.36`（自称 Mozilla 却无引擎版本号，与脚本客户端强相关）
+换成了结构完整的移动端 Chrome UA，但两个 PC 验证脚本没跟着改。
+于是"协议层已验证"这个结论**是假的**。
+
+**护栏做法**（强烈建议照抄）：写一个一致性自检，
+以 App 源码为**唯一基准**，自动比对每个验证脚本：
+
+```js
+// tools/fingerprint-check.mjs 要点
+// 1. 从 Constants.ets 抽权威值（不是再手抄一遍！）
+// 2. 逐脚本比对 UA / platform / 关键带头情况
+// 3. 做结构健全性检查：UA 必须以 Mozilla/5.0 开头、
+//    含 AppleWebKit、**且含引擎版本号**（缺版本号 = 编的）
+// 4. 全仓库扫残留，防止别处还留着旧字面量
+// 5. ★ 验证这个护栏"确实会报警"：故意注入漂移看它是否变红
+```
+
+> **抽值时要当心同名常量。** 本项目里 `DsHeader.PLATFORM` 是
+> **请求头名字**（`'x-ds-platform'`），`DsDevice.PLATFORM` 才是
+> **要发送的值**（`'web'`）。用全局正则抓 `PLATFORM` 会张冠李戴。
+> 正确做法是**先定位 `export class Xxx {` 块再取值**。
+
+**判据**：一个从没红过的检查项，等于没有检查项。
+写完护栏后**必须注入一次错误、确认它报警**，再还原。
+
 ### 11.2 抓日志
 
 ```bash
@@ -1093,6 +1137,82 @@ fi
 "$HDC" shell "bm install -p /data/local/tmp/app.hap -r"
 echo "[install] 完成"
 ```
+
+### A.4 `tools/fingerprint-check.mjs` —— 设备指纹一致性护栏
+
+> 对应第 11 章讲的那个致命陷阱：PC 验证脚本的请求头必须与 App 一致，
+> 否则「脚本跑通」不代表「App 能跑通」。这个脚本**以 App 源码为唯一基准**自动比对。
+
+```js
+import { readFileSync, readdirSync } from 'fs';
+
+const APP_CONST = 'entry/src/main/ets/common/Constants.ets';
+const TOOLS = ['tools/live-e2e.mjs', 'tools/probe-auth.mjs'];
+
+const appSrc = readFileSync(APP_CONST, 'utf8');
+
+// ★ 必须先定位 class 块再取值：同名常量含义可能不同
+function pickClassConst(className, name) {
+  const cm = new RegExp(`export\\s+class\\s+${className}\\s*\\{`).exec(appSrc);
+  if (!cm) { return ''; }
+  const rest = appSrc.slice(cm.index);
+  const next = rest.indexOf('\nexport ');
+  const block = next > 0 ? rest.slice(0, next) : rest;
+  const m = new RegExp(
+    `static\\s+readonly\\s+${name}\\s*:\\s*string\\s*=\\s*\\n?\\s*'([^']*)'`).exec(block);
+  return m ? m[1] : '';
+}
+
+const appUA = pickClassConst('DsHeader', 'USER_AGENT');
+const appPlatform = pickClassConst('DsDevice', 'PLATFORM');
+
+let failures = 0;
+const check = (name, pass, extra = '') => {
+  console.log((pass ? '✓ ' : '✗ ') + name + (extra ? '  ' + extra : ''));
+  if (!pass) { failures++; }
+};
+
+// 1. UA 结构健全性：自称 Mozilla 就必须带引擎版本号
+check('UA 以 Mozilla/5.0 开头', appUA.startsWith('Mozilla/5.0'));
+check('UA 含 AppleWebKit', appUA.includes('AppleWebKit/'));
+check('★ UA 含引擎版本号', /(Chrome|Firefox|Version)\/\d+\.\d+/.test(appUA));
+
+// 2. 逐脚本比对
+for (const f of TOOLS) {
+  const src = readFileSync(f, 'utf8');
+  const uaM = /const\s+UA\s*=\s*'([^']*)'/.exec(src);
+  const platM = /const\s+PLATFORM\s*=\s*'([^']*)'/.exec(src);
+  check(`${f} UA 一致`, !!uaM && uaM[1] === appUA,
+    uaM && uaM[1] !== appUA ? `\n    脚本: ${uaM[1]}\n    App : ${appUA}` : '');
+  check(`${f} PLATFORM 一致`, !!platM && platM[1] === appPlatform);
+  check(`${f} 带 x-ds-platform 头`, src.includes('x-ds-platform'));
+}
+
+// 3. 全仓库扫残留（逐行判定，注释里的说明不算违规）
+const OLD = '旧 UA 的可识别片段';
+const walk = (dir) => {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    if (['node_modules', 'build', '.git'].includes(e.name)) { continue; }
+    const p = `${dir}/${e.name}`;
+    if (e.isDirectory()) { walk(p); continue; }
+    if (!/\.(mjs|js|ets|ts)$/.test(e.name)) { continue; }
+    if (e.name === 'fingerprint-check.mjs') { continue; }   // 自身含该模式
+    const live = readFileSync(p, 'utf8').split('\n').filter((ln) => {
+      const s = ln.trim();
+      if (s.startsWith('//') || s.startsWith('*')) { return false; }
+      return ln.split('//')[0].includes(OLD);
+    });
+    if (live.length) { check(`${p} 无旧 UA 残留`, false, `(${live.length} 处)`); }
+  }
+};
+walk('.');
+
+console.log(failures === 0 ? '结果：全部一致' : `结果：${failures} 项不一致`);
+process.exit(failures === 0 ? 0 : 1);
+```
+
+> **写完护栏必须做一次「注入测试」**：故意把某个脚本的 UA 改错，
+> 确认它变红，再还原。**从没红过的检查等于没有检查。**
 
 ---
 

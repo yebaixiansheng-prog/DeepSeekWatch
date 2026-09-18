@@ -20,7 +20,8 @@
 | 本轮新增功能 | 右上角 `≡` → **历史对话列表页**；删除「快速/专项模式」切换；`⋯` 设置浮层只留深度思考/联网搜索 |
 | 本轮性能改造 | **PoW 改写成 C++ NAPI 原生模块**，真机 **44,318ms → 232ms（快 190 倍）**；再加后台预热，发送时几乎瞬时 |
 | **本轮关键修复（2026-09-18）** | ① **登录风控**：补齐登录体设备字段 + 换掉异常 UA + device_id 全链路稳定（详见 Bug 15）<br>② ★★ **「聊两轮之后再也发不出去」**：`preempt:false` 被服务端排队挂死（详见 Bug 16），**这是用户反馈最痛的问题**<br>③ **静默看门狗**：连接建立但零数据时 45s 内自动判定并提示，不再无限转圈（详见 Bug 17） |
-| 本轮离线验证 | `node tools/pow-verify.mjs`（**8/8**）、`node tools/sse-parser-test.mjs`（**16/16**，本轮从 9 项扩到 16 项）；`tools/live-e2e.mjs` 新增**多轮对话用例**（【5】，专测 Bug 16） |
+| 本轮离线验证 | `node tools/pow-verify.mjs`（**8/8**）、`node tools/sse-parser-test.mjs`（**16/16**，本轮从 9 项扩到 16 项）、`node tools/fingerprint-check.mjs`（**全绿**）；`tools/live-e2e.mjs` 新增**多轮对话用例**（【5】，专测 Bug 16） |
+| ★ 本轮隐蔽陷阱 | **PC 验证脚本的 UA 与 App 不一致**：为修风控 App 换了 UA，但 `live-e2e.mjs`/`probe-auth.mjs` 还留着旧的伪造 UA → 脚本在验证一个**已不存在的客户端指纹**，所以「协议层已验证」这个结论**是假的**。已同步修复并新增 `fingerprint-check.mjs` 护栏 |
 | **本轮加固（2026-09-18 晚）** | `Store` 全操作加 try/catch + 新增 `getChecked()`（区分「真没值」与「没读到」）；`AuthService.restore()` 用 `getChecked` 并暴露 `isRestoreFailed()`；`Index` 同时判 `!Store.isReady()` 与 `isRestoreFailed()`；`PowSolver` 新增 `PowFail` 区分「取不到题」与「算超时」，`waitPrewarm` 60s→20s 且改为「先看结果再等」 |
 | **真机状态** | ⚠️ **本轮未复验**：构建成功但电脑（`192.168.31.20/24`）与手表（两次截图均为 `192.168.47.107:45165`）**不在同一网段**，`hdc list targets` 为空。需用户把两端放到同一 Wi-Fi 后重跑 |
 | 当前状态 | App 处于**未登录**（早前测试误触「退出登录」抹掉了 token），**需用户在手表上登录一次**才能继续端到端验证 |
@@ -155,8 +156,9 @@
 | `entry/src/main/ets/model/PowSolver.ets` | `prewarm()` / `doPrewarm()` / `waitPrewarm()` **新增** | 预热 + 等待中透传进度 |
 | `entry/src/main/ets/common/Constants.ets` | `SESSION_FETCH='/api/v0/chat_session/fetch_page'`、`ModelType.QUICK='default'` | expert/vision 账号不可用，别改 |
 | `entry/src/main/resources/base/profile/main_pages.json` | 4 页：Index/LoginPage/ChatPage/**HistoryPage** | 加页面必须在此注册 |
-| `tools/sse-parser-test.mjs` | **新增** | SSE patch 解析回归测试（9 个用例，`node tools/sse-parser-test.mjs`） |
+| `tools/sse-parser-test.mjs` | **新增** | SSE patch 解析回归测试（**16 个用例**，`node tools/sse-parser-test.mjs`） |
 | `tools/pow-verify.mjs` | **新增** | **PoW 全链路验证**：直接执行 `DeepSeekHash.ets` 源码 + 独立 BigInt 参考实现交叉验证（8 项全绿，`node tools/pow-verify.mjs`） |
+| `tools/fingerprint-check.mjs` | **新增** | **设备指纹一致性护栏**：验证脚本的 UA/platform 必须与 App 一致（`node tools/fingerprint-check.mjs`） |
 
 ---
 
@@ -617,13 +619,23 @@ hdc -t <手表IP>:45165 install entry/build/default/outputs/default/entry-defaul
 | 脚本 | 作用 | 现状 |
 |---|---|---|
 | `node tools/pow-verify.mjs` | PoW 全链路：把 `DeepSeekHash.ets` **源码原样**转 JS 执行，与独立 BigInt 参考实现比对，覆盖 `permute`/`hashString`/`selfTest`/`searchRange` 快速路径 | **8/8 通过** |
-| `node tools/sse-parser-test.mjs` | SSE 解析回归 | **9/9 通过** |
-| `node tools/live-e2e.mjs` | **PC 端全链路**：自动从手表读 token（也可 `DS_TOKEN=` 指定），验证 鉴权 → PoW → SSE 对话 → 历史回读 | 需手表已登录 |
+| `node tools/sse-parser-test.mjs` | SSE 解析回归 | **16/16 通过** |
+| `node tools/fingerprint-check.mjs` | **设备指纹一致性护栏**：以 `Constants.ets` 为唯一基准，自动比对 `live-e2e.mjs`/`probe-auth.mjs` 的 UA、PLATFORM、`x-ds-platform` 带头；含 UA 结构健全性检查与全仓库残留扫描 | **全绿** |
+| `node tools/live-e2e.mjs` | **PC 端全链路**：自动从手表读 token（也可 `DS_TOKEN=` 指定），验证 鉴权 → PoW → SSE 对话 → 历史回读 → **多轮连续对话** | 需手表已登录 |
 | `node tools/probe-auth.mjs` | 探测服务端鉴权失败的响应形态（用来确认「HTTP 200 但 code=40002/40003」） | 参考用 |
 
 > **改哈希相关代码后必须先跑 `pow-verify.mjs`。**
 > 它执行的是**真源码**——之前我手抄了一份算法去验证，抄错 5 处得出「工程算法有问题」的**错误结论**，
 > 白白排查很久。**永远不要用复制品去验证产品。**
+
+> **改请求头 / UA / 平台标识后必须先跑 `fingerprint-check.mjs`。**
+> ★ 本轮真踩到：App 侧为修风控换了 UA，但 `live-e2e.mjs`/`probe-auth.mjs`
+> **还留着旧的伪造 UA**。后果极其隐蔽 —— 脚本其实在验证一个**已经不存在的客户端指纹**，
+> 于是「PC 上协议层已验证通过」这个结论**是假的**，喊绿的检查反而掩盖了风险。
+> 这个护栏就是为此存在的：**验证脚本的指纹必须与 App 完全一致。**
+
+> **写完任何「检查类」脚本，必须做一次注入测试**（故意改错 → 确认它报警 → 还原）。
+> 从没红过的检查等于没有检查。
 
 ---
 
