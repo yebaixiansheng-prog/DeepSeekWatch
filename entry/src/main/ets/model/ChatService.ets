@@ -147,7 +147,12 @@ export class ChatService {
     }
     if (powHeader === null) {
       if (cb.onError) {
-        cb.onError('pow_failed');
+        // ★ 把 PoW 的具体病因透出去，而不是笼统的 'pow_failed'。
+        //   「没拿到挑战」（网络/风控，重试有意义）与
+        //   「求解超时」（算力不足，重试大概率还超时）对用户是两回事，
+        //   给同一句"请重试"会让人陷入无效重试。
+        const why: string = PowSolver.getLastFail();
+        cb.onError(why.length > 0 ? why : 'pow_failed');
       }
       return;
     }

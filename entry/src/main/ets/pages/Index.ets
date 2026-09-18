@@ -47,7 +47,13 @@ struct Index {
     // ★ 存储读不出来时绝不能显示登录页：
     //   token 其实还在磁盘上，把用户引导去重新输密码是纯粹的伤害。
     //   这里单独标出来，UI 给「重试」而不是「登录」。
-    this.storageFailed = !Store.isReady();
+    //
+    //   ⚠️ 两个来源都要覆盖：
+    //     ① Store 整体没就绪（isReady()=false）
+    //     ② Store 就绪了但 **这一次读 token 失败**（isRestoreFailed()）
+    //   第 ② 种更隐蔽 —— 存储初看起来正常，只是某次读抛了异常，
+    //   旧代码会拿到空串并当成「未登录」。
+    this.storageFailed = !Store.isReady() || AuthService.isRestoreFailed();
     this.loggedIn = ok;
     this.checked = true;
   }

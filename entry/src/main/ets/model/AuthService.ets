@@ -1,6 +1,6 @@
 import { DsApi, DsDevice, DsHeader, LoginBizCode } from '../common/Constants';
 import { Http, DsResponse, DeviceIdCache } from './Http';
-import { Store, Keys } from '../common/Store';
+import { Store, Keys, StoreRead } from '../common/Store';
 
 /** 用户信息 */
 export interface DsUser {
@@ -270,8 +270,26 @@ export class AuthService {
   }
 
   /** 恢复登录态 */
+  /**
+   * 恢复登录态
+   *
+   * ⚠️ 必须用 `getChecked` 而不是 `get`（2026-09-18 加固）：
+   *    `get()` 在**读取失败**时返回默认值，调用方拿到空串会认为
+   *    「用户没登录」→ 把人踹回登录页让他重打密码。
+   *    但真实情况可能只是存储偶发读不出来，**token 其实还在**。
+   *    手表上重输一次密码的代价极高，所以这里要能区分两种情况：
+   *      - `ok=false`（没读到）→ 返回 `false` 但**设置** `restoreFailed`，
+   *        让 UI 提示「重试」而不是「请登录」。
+   */
   static async restore(): Promise<boolean> {
-    const token: string = await Store.get(Keys.TOKEN, '');
+    const r: StoreRead = await Store.getChecked(Keys.TOKEN);
+    if (!r.ok) {
+      // 存储不可用：不是"未登录"，别把用户引去重打密码
+      AuthService.restoreFailed = true;
+      return false;
+    }
+    AuthService.restoreFailed = false;
+    const token: string = r.value;
     if (token.length === 0) {
       return false;
     }
@@ -285,6 +303,13 @@ export class AuthService {
       }
     }
     return true;
+  }
+
+  /** 上次 restore 是否因为「存储读不出来」而失败（而非确实没登录） */
+  private static restoreFailed: boolean = false;
+
+  static isRestoreFailed(): boolean {
+    return AuthService.restoreFailed;
   }
 
   /** 退出登录 */

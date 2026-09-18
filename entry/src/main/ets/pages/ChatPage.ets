@@ -8,7 +8,7 @@ import { DsApi, FragmentType, FragStatus, Role, ModelType } from '../common/Cons
 import { Store, Keys } from '../common/Store';
 import { RoundSwitchRow } from '../components/RoundWidgets';
 import { Nav } from '../common/Nav';
-import { PowSolver } from '../model/PowSolver';
+import { PowSolver, PowFail } from '../model/PowSolver';
 
 /**
  * 对话页（圆形表盘深度定制）
@@ -801,6 +801,13 @@ struct ChatPage {
   private errText(code: string): string {
     if (code === 'pow_failed') {
       return '安全校验失败，请重试';
+    }
+    // ★ PoW 的两种失败要分开说（见 PowSolver.getLastFail 的注释）
+    if (code === PowFail.NO_CHALLENGE) {
+      return '无法获取安全校验题（网络或登录态异常）。请检查网络后重试';
+    }
+    if (code === PowFail.TIMEOUT) {
+      return '安全校验超时（设备算力或网络较慢）。请稍后重试，或切换到更稳的网络';
     }
     if (code === 'stream_error') {
       return '网络中断，请重试';

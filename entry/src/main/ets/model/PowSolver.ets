@@ -24,6 +24,14 @@ export interface PowResult {
   durationMs: number;
 }
 
+/** PoW 失败原因：用于给用户**不同**的提示（否则一律"请重试"毫无指导意义） */
+export class PowFail {
+  /** 取挑战失败（网络 / token / 风控） */
+  static readonly NO_CHALLENGE: string = 'pow_no_challenge';
+  /** 求解超预算（算力不足或难度异常） */
+  static readonly TIMEOUT: string = 'pow_timeout';
+}
+
 /**
  * PoW 工作量证明求解器
  *
@@ -264,6 +272,7 @@ export class PowSolver {
    */
   static async prepare(token: string, targetPath: string,
     onProgress?: (tried: number, total: number) => void): Promise<string | null> {
+    PowSolver.lastFail = '';
     const cached: string | null = PowSolver.reuseCache(targetPath);
     if (cached !== null) {
       return cached;
@@ -282,17 +291,36 @@ export class PowSolver {
     try {
       const ch: PowChallenge | null = await PowSolver.fetchChallenge(token, targetPath);
       if (ch === null) {
+        PowSolver.lastFail = PowFail.NO_CHALLENGE;
         return null;
       }
       const r: PowResult | null = await PowSolver.solve(ch, onProgress);
       if (r === null) {
+        // 求解返回 null 只可能是「超预算」——分出来，用户看到的提示才有意义
+        PowSolver.lastFail = PowFail.TIMEOUT;
         return null;
       }
       PowSolver.saveCache(ch, r.answer, targetPath);
       return PowSolver.buildHeaderValue(ch, r.answer, targetPath);
     } catch (e) {
+      PowSolver.lastFail = PowFail.NO_CHALLENGE;
       return null;
     }
+  }
+
+  /**
+   * 上一次 prepare 的失败原因（空串 = 没失败过）
+   *
+   * ★ 为什么要有它：PoW 失败有两种完全不同的病因 ——
+   *   「没拿到挑战」（网络/token/风控，重试可能有用）与
+   *   「求解超时」（算力不够，重试大概率还是超时，应该提示换网或稍后再试）。
+   *   两者都回一个 null 的话，UI 只能笼统说"安全校验失败，请重试"，
+   *   用户会陷入无效重试。
+   */
+  private static lastFail: string = '';
+
+  static getLastFail(): string {
+    return PowSolver.lastFail;
   }
 
   /**
@@ -344,13 +372,32 @@ export class PowSolver {
    * 进度来自 solve() 写入的静态字段 —— 预热那道题的进度就是用户看到的进度，
    * 不会出现「进度条一直 0%」的假死观感。
    *
+   * ★ 超时上限不能太长（2026-09-18 调整）：
+   *   旧实现死等 60 秒。如果预热那道题在极端情况下卡住（原生模块 hang、
+   *   任务调度迟迟不返回），用户点发送后会**先呆等 60 秒**才开始真正求解 ——
+   *   本来 200ms 的事变成一分钟，观感上就是「点了没反应」。
+   *   现在改为：每轮循环检查是否已经超时才停，
+   *   并且上限收到 20 秒 —— 超过就自己解，**不陪跑**。
+   *   （正常的预热 200~300ms 就完了，20 秒已经是非常宽松的异常兜底。）
+   *
    * @returns 预热成功后可直接用的请求头值；失败/超时返回 null（调用方自己再解一次）
    */
   private static async waitPrewarm(targetPath: string,
     onProgress?: (tried: number, total: number) => void): Promise<string | null> {
     const start: number = Date.now();
-    // 预热本身有 45 秒预算，这里留 60 秒上限兜底，避免极端情况下死等
-    while (PowSolver.prewarming !== null && Date.now() - start < 60000) {
+    const LIMIT_MS: number = 20000;
+    while (PowSolver.prewarming !== null) {
+      // 先看结果：已经算好了就立刻返回，不用等 prewarming 清空
+      const cached: string | null = PowSolver.reuseCache(targetPath);
+      if (cached !== null) {
+        return cached;
+      }
+      if (Date.now() - start >= LIMIT_MS) {
+        hilog.warn(0x0001, TAG,
+          'waitPrewarm timeout after %{public}dms — solving on our own',
+          Date.now() - start);
+        break;
+      }
       if (onProgress && PowSolver.progressTotal > 0) {
         onProgress(PowSolver.progressTried, PowSolver.progressTotal);
       }
