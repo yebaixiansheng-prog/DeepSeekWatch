@@ -742,6 +742,10 @@ struct ChatPage {
           respBuf = '';
           gotAny = false;
           this.statusText = '重新校验…';
+          // ★ 重试是「又开了一轮」，必须把看门狗时间窗重启。
+          //   否则重试这一轮会继承上一轮已经消耗掉的时间，
+          //   可能在正常等待中就被硬上限打断，弹出假的超时提示。
+          this.startSendWatchdog(asstId);
           this.chat.send(AuthService.getToken(), params, DsApi.COMPLETION, cb);
           return;
         }

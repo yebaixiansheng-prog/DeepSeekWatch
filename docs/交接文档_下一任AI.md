@@ -15,7 +15,7 @@
 | 工程路径 | `D:\HarmonyBuild\DeepSeekWatch` |
 | 包名 | `com.dswatch.round`（穿戴设备 wearable） |
 | 形态 | HarmonyOS 圆形手表 App，ArkTS/ArkUI，DevEco Studio 构建 |
-| 当前可装包 | `entry/build/default/outputs/default/entry-default-signed.hap`（**1,601,679 字节，2026-09-18 20:22 构建**） |
+| 当前可装包 | `entry/build/default/outputs/default/entry-default-signed.hap`（**1,601,716 字节，2026-09-18 20:35 构建**） |
 | 已修 Bug | **17 个**（登录/输入法/发送无反应/PoW算法/SSE格式/THREAD_BLOCK_6S/渲染不刷新/布局溢出 + 本轮新增 3 个，详见第 2 节） |
 | 本轮新增功能 | 右上角 `≡` → **历史对话列表页**；删除「快速/专项模式」切换；`⋯` 设置浮层只留深度思考/联网搜索 |
 | 本轮性能改造 | **PoW 改写成 C++ NAPI 原生模块**，真机 **44,318ms → 232ms（快 190 倍）**；再加后台预热，发送时几乎瞬时 |
@@ -415,6 +415,18 @@ this.chat.stop(AuthService.getToken(), this.sessionId, '');
 3. **新文案**
    - `stalled` → 「服务端无响应（连接被挂起）。请重试；若反复出现，点左下角「＋」新建对话」
    - `srv_40303` → 「上一轮回复未结束，请稍候重试」
+4. **重试时重启看门狗时间窗**（易漏）：PoW 被判无效后自动重试会**再开一轮**，
+   必须调 `startSendWatchdog(asstId)` 重算起点。
+   否则重试这一轮继承上一轮已消耗的时间，可能在正常等待中就被 3 分钟硬上限打断，
+   弹出**假的**超时提示。
+
+> **定时器生命周期**（新增看门狗后必须保持的纪律）：
+> `ChatPage` 的 `sendTimer` 必须在**所有结束路径**上清理 ——
+> 正常结束（`finishAssistant`）、用户停止（`stopGeneration`）、页面销毁（`aboutToDisappear`）。
+> `SseClient` 的 `watchdogTimer` 则在 `emitFinish()` 与 `dispose()` 里清理。
+> 改动发送链路后，**务必用 `grep -n "setTimeout\|setInterval"` 复查一遍**，
+> 确认每个定时器都有对应的 clear，且页面销毁时不会遗留回调。
+> 漏清理的表现是：离开页面后仍弹出超时提示，或重复的看门狗互相打断。
 
 ### 怎么验证「真的修好了」
 
@@ -457,6 +469,33 @@ node tools/live-e2e.mjs
    - **`frames>0 textLen>0` 但界面空白** → **Bug 9 又回来了**（`ForEach` key 没带 `rev`）；
    - `frames=0` 且 45s 后 `STALLED` → **先确认 `preempt` 是不是又被改回 `false` 了**；
    - `NativeHash: native selfTest=FAIL` → 原生模块没生效，会自动回退 ArkTS（慢但能发出去）。
+
+### 本轮的真机复验状态（⚠️ 未完成）
+
+截至 **2026-09-18 20:35**，本轮修复**只做了代码层 + 离线回归验证**，
+**真机端到端没有复验**，原因是电脑与手表不在同一网段：
+
+| 项 | 值 |
+|---|---|
+| 电脑 IPv4 | `192.168.31.20/24`（另有一个 `172.30.200.33` 的虚拟适配器 `vgate0`） |
+| 手表报的地址 | `192.168.47.107`（IP 段完全不同） |
+| `hdc list targets` | `[Empty]` |
+| 主动扫描 | `192.168.31.x` / `192.168.47.x` / `192.168.1.x` / `172.30.200.x` 的 **45165 与 4516 端口全无响应** |
+
+> ⚠️ **不要在网段不一致时反复扫描**（已扫 1000+ 地址，全部无效）。
+> 先让用户把电脑与手表连到**同一个 Wi-Fi**，再重新读手表"通过 WLAN 调试"页面上的地址。
+> 这是最快的路径。
+
+**复验步骤（等网络就绪后照做）**：
+
+1. 读手表当前地址 → `./tools/d.sh tconn <IP>:45165` → `./tools/d.sh list targets` 确认 `Connected`
+2. 让用户在手表上**登录一次**（当前 token 已被早前误触"退出登录"抹掉）
+3. 装新包：`./tools/build.sh && ./tools/d.sh install -r ...`（或走附录的三步部署法）
+4. **重点复验 Bug 16**：在同一个会话里连续发 3 条消息。
+   判据：**每一条都要有回复**，第 3 条尤其关键（这是原 Bug 的触发点）。
+   同时 `./tools/w.sh log 'SseClient'` 看有没有 `STALLED`。
+5. 若风控仍复现：先用浏览器在同一网络登录一次 deepseek.com，再回手表重试。
+6. 回填本文档的"真机状态"一行。
 
 ---
 
