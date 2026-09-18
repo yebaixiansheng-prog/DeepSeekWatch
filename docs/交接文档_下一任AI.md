@@ -1,8 +1,8 @@
 # 交接文档 — 给「下一个 AI」（DeepSeek 手表版 HarmonyOS 工程）
 
 > 阅读对象：接手本工程、继续做手表端功能开发与真机验证的 AI。
-> 最后更新：**2026-09-13**（本轮完成：历史对话页、PoW 提速、SSE 解析加固）
-> 配套阅读：`docs/API_SPEC.md`（接口逆向规格，必读）、`docs/交接文件清单.md`（打包给第三方的文件清单）、`docs/鸿蒙开发实战教程.md`（第 9 章是六个真实 Bug 的完整复盘）。
+> 最后更新：**2026-09-18**（本轮完成：登录风控修复、**多轮对话挂死修复**、静默看门狗、AI 执行手册）
+> 配套阅读：`docs/API_SPEC.md`（接口逆向规格，必读）、`docs/交接文件清单.md`（打包给第三方的文件清单）、`docs/鸿蒙开发实战教程.md`（第 9 章是六个真实 Bug 的完整复盘）、**`docs/鸿蒙手表应用开发_AI执行手册.md`（给另一个 AI 的独立开发手册，用于并行开发其他手表应用）**。
 >
 > 本文定位：让下一个 AI 在 **10 分钟内** 接手，知道「已经做到哪、卡在哪、下一步改哪、怎么验证」。
 
@@ -15,13 +15,14 @@
 | 工程路径 | `D:\HarmonyBuild\DeepSeekWatch` |
 | 包名 | `com.dswatch.round`（穿戴设备 wearable） |
 | 形态 | HarmonyOS 圆形手表 App，ArkTS/ArkUI，DevEco Studio 构建 |
-| 当前可装包 | `entry/build/default/outputs/default/entry-default-signed.hap`（**1,591,136 字节，2026-09-13 15:53 构建，md5 `631a325aab4951cb375436202bc689f8`**） |
-| 已修 Bug | **14 个**（登录/输入法/发送无反应/PoW算法/SSE格式/THREAD_BLOCK_6S/渲染不刷新/布局溢出 + 本轮新增 6 个，详见第 2 节） |
+| 当前可装包 | `entry/build/default/outputs/default/entry-default-signed.hap`（**1,601,679 字节，2026-09-18 20:22 构建**） |
+| 已修 Bug | **17 个**（登录/输入法/发送无反应/PoW算法/SSE格式/THREAD_BLOCK_6S/渲染不刷新/布局溢出 + 本轮新增 3 个，详见第 2 节） |
 | 本轮新增功能 | 右上角 `≡` → **历史对话列表页**；删除「快速/专项模式」切换；`⋯` 设置浮层只留深度思考/联网搜索 |
 | 本轮性能改造 | **PoW 改写成 C++ NAPI 原生模块**，真机 **44,318ms → 232ms（快 190 倍）**；再加后台预热，发送时几乎瞬时 |
-| 本轮离线验证 | `node tools/pow-verify.mjs`（**8/8**）、`node tools/sse-parser-test.mjs`（**9/9**）、`node tools/live-e2e.mjs`（PC 端全链路，需 token） |
-| **真机状态** | ✅ **已连上并跑通**（`<DEVICE_IP>:45165`）：历史页拉到 50 个会话、PoW 原生自检 PASS、消息往返正常（`1+1=?`→`2`、`3x7=?`→`21`） |
-| 当前状态 | App 处于**未登录**（测试中误触「退出登录」抹掉了 token），**需用户在手表上登录一次**才能继续端到端验证 |
+| **本轮关键修复（2026-09-18）** | ① **登录风控**：补齐登录体设备字段 + 换掉异常 UA + device_id 全链路稳定（详见 Bug 15）<br>② ★★ **「聊两轮之后再也发不出去」**：`preempt:false` 被服务端排队挂死（详见 Bug 16），**这是用户反馈最痛的问题**<br>③ **静默看门狗**：连接建立但零数据时 45s 内自动判定并提示，不再无限转圈（详见 Bug 17） |
+| 本轮离线验证 | `node tools/pow-verify.mjs`（**8/8**）、`node tools/sse-parser-test.mjs`（**9/9**）；`tools/live-e2e.mjs` 新增**多轮对话用例**（【5】，专测 Bug 16） |
+| **真机状态** | ⚠️ **本轮未复验**：构建成功但电脑（`192.168.31.20/24`）与手表（报 `192.168.47.107`）**不在同一网段**，`hdc list targets` 为空。需用户把两端放到同一 Wi-Fi 后重跑 |
+| 当前状态 | App 处于**未登录**（早前测试误触「退出登录」抹掉了 token），**需用户在手表上登录一次**才能继续端到端验证 |
 | 最大坑 | PoW 是 DeepSeek 强制的反爬工作量证明，**不能删**，只能优化；难度 144000，ArkTS 算力天花板约 1000~2000 哈希/秒 → 必须走原生 |
 
 ---
@@ -36,7 +37,7 @@
 
 ---
 
-## 2. 已完成的工作（14 个真实 Bug，均已修）
+## 2. 已完成的工作（17 个真实 Bug，均已修）
 
 完整复盘在 `docs/鸿蒙开发实战教程.md` 第 9 章。速查：
 
@@ -56,6 +57,9 @@
 | 12 | ★ 登录成功后按返回又见登录页 | 像没登上，反复登录 | `LoginPage` 用 `replaceUrl` 会把栈变成 `[Index, Index]`，返回退回到旧实例（`loggedIn` 仍是 false） | **已修（本轮）**：`router.clear()` + `replaceUrl`，保证栈里只有一个入口页 |
 | 13 | ★ token 失效时提示「网络失败」并让人无限重试 | 永远好不了 | 鉴权失败时 **HTTP 状态码也是 200**（实测 `code:40002/40003`），旧代码把非 0 码一律当成「获取失败」；另外被网关拦回来的 **HTML** 会 `JSON.parse` 抛异常被误报成网络不通 | **已修（本轮）**：`Http.parse()` 拆出 `-1`(网络) / `-2`(非 JSON)；`listSessions` 识别 `40002/40003` 并回 `needRelogin`，UI 给「重新登录」入口 |
 | 14 | ★ 冷启动偶发把用户踹回登录页 | 明明登录过却要重登 | `Store.init()` 失败后 `pref` 永久为 null，之后所有 `get` 返回默认值 → `restore()` 拿到空 token，且**没有任何重试机会** | **已修（本轮）**：保留 `ctx`，任何一次读写都尝试补初始化；新增 `isReady()`，存储读不出来时给「重试」而非引导去打密码 |
+| 15 | ★ **换网络就报风控，但手表浏览器能正常登录** | 用代理/VPN 出口时稳定报「当前网络环境有风险」（`RISK_DEVICE_DETECTED`, biz_code=11）；同一网络下**手表自带浏览器访问 chat.deepseek.com 完全正常且登录态长期保持** | **不是网络被封，是这个请求不像正常客户端**。两个原因叠加：<br>① **登录体缺字段** —— web 客户端会同时送 `device_name` / `device_model` / `token` / `platform` 做设备可信度评分，本项目早期**只发了 `device_id`**；<br>② **UA 不像任何真实浏览器** —— 旧 UA 自称 Mozilla/Safari 却没有版本号，与"脚本客户端"强相关。<br>浏览器没事是因为它有**长期稳定的设备指纹 + Cookie 会话**，是"可信设备"；App 每次全新安装生成**新的随机 device_id** 又无 Cookie → 风控眼里就是"陌生设备从可疑出口登录" | **已修（本轮）**：<br>① 登录体补齐 `device_name`/`device_model`/`token`/`platform`（`DsDevice` 常量类）；<br>② UA 换成结构完整的移动端 Chrome UA；<br>③ `device_id` 改为**全链路可见**（新增 `x-ds-device-id` + `x-ds-platform` 请求头，启动时 `AuthService.warmUp()` 预热同步缓存 `DeviceIdCache`）；<br>④ 风控文案改成**可操作**的指引（"先在同一网络下用浏览器登录一次"），并写明**不要**把 `device_id` 改成每次随机 |
+| 16 | ★★★ **「对话超过两次之后就达上限，无法继续对话」** | 聊 2~3 轮后消息发不出去：界面停在「准备中…」，**连接建立了但一个字节都不回**，没有报错、没有超时，永久挂死 | **`preempt:false` 的排队语义**。服务端发现该 session 上还有未结束的流（哪怕上一轮"本地已放弃、服务端还在跑"的**僵尸流**），就把新请求**挂在队列里**，既不发数据也不报错。<br>为什么偏偏"两次之后"：第 2 轮若用户中途退出页面/掉网/息屏，服务端那条流不会立刻结束 → 第 3 轮开始就撞上排队，**之后永远好不了**。<br>**放大因素**：`ChatService.stop()` 被调用时 `messageId` 传的是空串，服务端直接忽略 → "本地以为停了、服务端还在跑"，僵尸流源源不断 | **已修（本轮）**：<br>① `ChatService.send()` 里 **`preempt` 改为 `true`**（抢占语义，也是官方 web 客户端的行为）；<br>② `SseClient` 新增 `onMessageId` 回调，从**首帧 response 对象**里捞服务端真实 `message_id`（兼容 `message_id`/`messageId`/`id`）；<br>③ `ChatService` 记录 `lastSessionId`/`lastMessageId`，**下一轮发送前主动 `stop_stream`** 清僵尸流（双保险）；<br>④ `stop()` 收到空 `messageId` 时**自动回退**到记录的 id，不再静默失败；<br>⑤ 干净结束时 `clearTurn()`，避免无谓请求 |
+| 17 | ★ **挂死时无任何反馈，界面永久转圈** | 界面卡在「准备中…」，发送按钮再也点不动，用户完全无法判断发生了什么 | SSE 层原本只在 `dataReceive`/`dataEnd`/异常时回调，**连接建立但零数据**这种情况三个回调都不触发 | **已修（本轮）**：<br>① `SseClient` 新增**静默看门狗**（每 5s 检查）：45s 内**零帧** → 判定被挂起，主动 abort 并报 `stalled`；已收过数据只是安静（长思考）→ 只告警不打断；<br>② `ChatPage` 新增**发送硬上限看门狗**（3 分钟），兜住"连回调都没回来"的极端情况；<br>③ 新错误码 `stalled` / `srv_40303` 有专门文案且**给出下一步怎么做** |
 
 代码层发送链路现状（已验证）：
 - `DeepSeekHash.ets`：`DeepSeekHashV1` 移植正确，`selfTest()` 通过标准向量。**禁止改动**（`Int32Array` 版实测更慢，属历史包袱，可回退但不影响功能——原生路径优先）。
@@ -253,6 +257,209 @@
 
 ---
 
+## 5.5 ✅ 用户问题一：换网络就报风控（Bug 15）
+
+**用户原话**：
+> 为什么我用代理网络的时候，它会显示风控，说我的网络环境用不了。
+> 但实际上我用手表端的第三方开发者浏览器，正常访问网页是可以访问的，
+> 并且它的登录状态会保存，就不需要重新登录。
+
+### 结论：被拦的不是「网络」，是「这个请求不像正常客户端」
+
+这是一个**很容易误判**的问题。表面看是"网络环境"问题（毕竟文案自己这么说，
+而且换到家庭宽带直连就好了），但浏览器在同一个网络里完全正常这一点，
+直接把"IP 被封"这个假设否掉了。
+
+真实原因有两层：
+
+**第一层：登录请求体缺字段。**
+
+DeepSeek 的 web 客户端登录时会同时提交：
+
+```json
+{
+  "email": "...", "mobile": "", "password": "...", "area_code": "+86",
+  "device_id": "...",
+  "device_name": "...",     // ← 本项目旧代码没发
+  "device_model": "...",    // ← 本项目旧代码没发
+  "token": "",              // ← 本项目旧代码没发（人机验证 token，密码登录为空串）
+  "platform": "web",        // ← 本项目旧代码没发
+  "os": "web"
+}
+```
+
+服务端用这几个字段做**设备可信度评分**。
+本项目早期只发了 `device_id`，风控视角就是
+「一个自称 web 的客户端，连自己的设备名和机型都报不出来」——
+在**出口 IP 本身不可信**（代理/VPN/共享出口）的时候，这个减分足以触发
+`RISK_DEVICE_DETECTED`。
+
+**第二层：UA 不像任何真实浏览器。**
+
+旧 UA：
+```
+Mozilla/5.0 (Linux; HarmonyOS; HUAWEI WATCH) AppleWebKit/537.36 (KHTML, like Gecko) Mobile Safari/537.36
+```
+
+它自称 Mozilla/Safari，却**没有 Chrome/Safari 的版本号**。
+真实浏览器一定会带 `Chrome/xxx.0.0.0` 这类渲染引擎版本标记。
+这个 UA 是"凭空编的"，与**脚本客户端**强相关。
+
+**为什么浏览器没事？**
+
+浏览器有 **长期稳定的设备指纹 + Cookie 会话**，在风控眼里是"可信设备"。
+而 App：
+
+- 每次全新安装生成一个**新的随机 `device_id`**（早期还会在异常时重新生成）
+- 完全没有 Cookie 可以复用（鸿蒙 `http` 模块默认不持久化 Cookie）
+
+在风控眼里就是「**陌生设备 + 可疑出口**」——两点都命中，必然拦。
+
+这也解释了用户观察到的"浏览器登录状态会保存"：
+那是 Cookie 在起作用，App 侧必须靠**持久化的 token + 稳定的 device_id** 来等价实现。
+
+### 修法（已落地）
+
+| 改动 | 位置 |
+|---|---|
+| 登录体补齐 `device_name`/`device_model`/`token`/`platform` | `Constants.ets` 的 `DsDevice` + `AuthService.login()` |
+| UA 换成结构完整的移动端 Chrome UA | `Constants.ets` 的 `DsHeader.USER_AGENT` |
+| 新增 `x-ds-device-id` + `x-ds-platform` 请求头，**所有请求**都带 | `Http.buildHeaders()` |
+| `device_id` 全链路可见：新增同步缓存 `DeviceIdCache`，启动时 `AuthService.warmUp()` 预热 | `Http.ets` + `AuthService.ets` + `EntryAbility.onCreate()` |
+| 风控文案改为**可操作指引**（"先用手机/电脑浏览器在同一网络下登录一次"） | `AuthService.login()` |
+
+> ⚠️ **【禁止】把 `device_id` 改成每次登录重新随机。**
+> 这是本项目历史上真实犯过的错（早期脚本每次随机 `device_id` 去撞接口，
+> 直接把出口 IP 打进风控名单）。`ensureDeviceId()` 的持久化语义**必须保留**。
+
+### 如果以后还遇到
+
+1. **先用浏览器在同一个网络下登录一次 `chat.deepseek.com`** ——
+   服务端会把这个出口标记为可信，之后手表端再登录通常就过了（最快的手段）。
+2. 确认手表端 `device_id` 是稳定的（同一个值反复用），
+   可在真机上查：`./tools/d.sh shell "cat /data/app/el2/100/base/com.dswatch.round/haps/entry/preferences/dswatch_store"`
+   里的 `<string key="deviceId">`。
+3. 确认请求头里有 `x-ds-device-id`（`probe-auth.mjs` 可以扩展来打印请求头）。
+
+---
+
+## 5.6 ★★★ 用户问题二：「对话超过两次之后就达上限」（Bug 16 + Bug 17）
+
+**用户原话**：
+> 它对话超过两次之后，就会达上限，然后显示无法再继续对话了。
+> 反正又不知道什么问题，反正它就不能对话了。
+
+### 结论：`preempt:false` 的排队语义 → 服务端把请求挂死
+
+这是**本项目历史上最隐蔽的一个 Bug**，因为它：
+
+- 不报错
+- 不超时（`readTimeout` 都没触发）
+- 没有任何日志线索（除了"什么都没有"）
+- 重新进页面、重新登录都不管用
+- **只有"多轮"才会出现**，单轮测试永远测不到
+
+### 机制
+
+`/api/v0/chat/completion` 的请求体里有一个 `preempt` 字段，两种语义：
+
+| `preempt` | 服务端行为 |
+|---|---|
+| `false` | **排队**：若该 session 上还有未结束的流，新请求被挂进队列 —— **既不返回数据，也不报错** |
+| `true` | **抢占**：先终止该 session 上的旧流，再开始新一轮（官方 web 客户端"发送"按钮的行为） |
+
+本项目早期写的是 `false`。于是：
+
+```
+第 1 轮  正常结束 → 干净
+第 2 轮  用户中途退出页面 / 掉网 / 息屏
+        → 本地 abortStream() 只断了 HTTP 连接
+        → 服务端那条流仍在跑（**僵尸流**）
+第 3 轮  preempt:false + 有僵尸流 → 排队 → 永久挂死
+        → 之后**每一轮**都挂死，永远好不了
+```
+
+这完美对应用户的"超过两次之后就不行了，而且再也好不了"。
+
+### 放大因素：`stop()` 传了空 message_id
+
+```typescript
+// 旧代码（ChatPage 里三处都是这么调的）
+this.chat.stop(AuthService.getToken(), this.sessionId, '');
+```
+
+`stop_stream` 需要 `message_id`。传空串时服务端**直接忽略这个请求**，
+于是"本地以为停了、服务端还在跑" —— 僵尸流源源不断地产出。
+
+### 修法（已落地，共 5 处）
+
+1. **`preempt` 改为 `true`** —— `ChatService.send()`
+2. **`SseClient` 新增 `onMessageId` 回调** —— 从首帧的 `response` 对象里捞
+   服务端真实 `message_id`（兼容 `message_id` / `messageId` / `id` 三种命名）
+3. **`ChatService` 记录 `lastSessionId` / `lastMessageId`**，
+   **下一轮发送前主动 `stop_stream`** 清僵尸流（在 `preempt:true` 之外的第二道保险）
+4. **`stop()` 收到空 `messageId` 时自动回退**到记录的 id，不再静默失败
+5. **干净结束时 `clearTurn()`**，避免发无谓的停流请求
+
+### 修法（Bug 17：可见性兜底）
+
+即使有了上面的修复，仍然需要一个"万一还是挂住了"的兜底 ——
+**永远不能出现"永久转圈、什么都不知道"的界面**：
+
+1. **`SseClient` 静默看门狗**（每 5 秒检查一次）
+   - 45 秒内**零帧** → 判定被服务端挂起，主动 `abort()` 并回调 `onError('stalled')`
+   - 已经收过数据、只是暂时安静（长思考的正常静默期）→ 只 `hilog.warn`，**不打断**
+2. **`ChatPage` 发送硬上限看门狗**（3 分钟）
+   - 兜住"极端网络下连任何回调都不触发"的情况
+   - 强制恢复 `sending=false`，并写一条明确的超时提示
+3. **新文案**
+   - `stalled` → 「服务端无响应（连接被挂起）。请重试；若反复出现，点左下角「＋」新建对话」
+   - `srv_40303` → 「上一轮回复未结束，请稍候重试」
+
+### 怎么验证「真的修好了」
+
+**PC 端（推荐，几秒钟）：**
+
+```bash
+node tools/live-e2e.mjs
+```
+
+`live-e2e.mjs` 的用例【5】就是专为这个 Bug 加的：
+**在同一个会话里连发 3 轮**，逐轮打印帧数与耗时。
+判定标准是"每一轮都必须在 60 秒内收到帧"。
+
+> 想复现原 Bug 做对照实验：把 `live-e2e.mjs` 里的 `preempt: true` 改回 `false`，
+> 并且只跑"第 1 轮"（让服务端的流保持未结束状态），
+> 你会看到第 2 轮**零帧超时** —— 这就是用户遇到的现象。
+
+**真机端：**
+
+```bash
+./tools/w.sh log 'SseClient|ChatService'
+```
+
+看这几行：
+
+- `sse STALLED no frame in 45xxx ms, aborting` → 挂死被看门狗抓到了
+- `sse quiet xxx ms (frames=N) — still waiting` → 正常的长思考静默，不用担心
+- `sse DONE frames=N textLen=M paths=...` → 正常结束
+
+### 如果以后又出现「发不出去」
+
+按这个顺序查（**从便宜到贵**）：
+
+1. `node tools/live-e2e.mjs` —— PC 全链路 + 多轮。
+   PC 上过了 ⇒ 问题在客户端 UI/渲染层，别去查网络。
+2. 真机抓日志（见上）。
+3. 看关键行：
+   - `sse DONE frames=0 textLen=0` → 服务端没回内容；
+   - `frames>0 textLen=0` → 帧收到了但都判成非正文，把 `paths=` 打出来核对；
+   - **`frames>0 textLen>0` 但界面空白** → **Bug 9 又回来了**（`ForEach` key 没带 `rev`）；
+   - `frames=0` 且 45s 后 `STALLED` → **先确认 `preempt` 是不是又被改回 `false` 了**；
+   - `NativeHash: native selfTest=FAIL` → 原生模块没生效，会自动回退 ArkTS（慢但能发出去）。
+
+---
+
 ## 6. 关键 API 契约速查（详见 `docs/API_SPEC.md`）
 
 | 接口 | 方法 | 用途 | 注意 |
@@ -385,6 +592,10 @@ hdc -t <手表IP>:45165 install entry/build/default/outputs/default/entry-defaul
 - 【禁止】把 `deviceTypes` 改成 `phone`——手表装不上。
 - 【禁止】删 `hvigor/` 目录——它是构建必需，不是缓存。
 - 【禁止】把 PoW「安全校验」当 Bug 删掉——它是 DeepSeek 强制反爬，删了消息直接 40301。
+- 【禁止】**把 `completion` 请求体的 `preempt` 改回 `false`**——这是「聊两轮之后再也发不出去」的根因（Bug 16）。服务端会把你排队挂死，且**不报错、不超时、无日志**，排查成本极高。
+- 【禁止】**把 `device_id` 改成每次登录重新随机**——风控会直接把出口 IP 拉黑（Bug 15）。`ensureDeviceId()` 的持久化语义必须保留，`DeviceIdCache` 的预热也不能删。
+- 【禁止】**给 `SseClient.start()` 传一个 callback 却漏掉 `onMessageId`**——漏了就拿不到服务端 `message_id`，下一轮清不了僵尸流（Bug 16 的放大因素）。若新增 SseClient 调用方，务必实现该回调。
+- 【禁止】让任何网络操作**没有失败出口**——必须保证"超时/挂起"最终会走到一次明确的 UI 反馈。`SseClient` 的静默看门狗与 `ChatPage` 的发送硬上限看门狗**都不许删**（Bug 17）。
 - 【注意】SSE 无 `event:` 名的帧才是正文增量，别再犯 Bug 5 的错；正文路径里的**索引不带类型**，别再犯 Bug 7 的错。
 - 【注意】`taskpool` 的 `@Concurrent` 函数**不能调同文件内函数、不能用 AppStorage**，只能 import 进来的线程安全模块。
 - 【注意】`router.getLength()` 返回的是**字符串**（页数），比较大小前必须 `parseInt`。

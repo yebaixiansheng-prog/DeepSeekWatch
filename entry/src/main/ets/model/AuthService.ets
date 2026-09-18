@@ -1,5 +1,5 @@
-import { DsApi, LoginBizCode } from '../common/Constants';
-import { Http, DsResponse } from './Http';
+import { DsApi, DsDevice, DsHeader, LoginBizCode } from '../common/Constants';
+import { Http, DsResponse, DeviceIdCache } from './Http';
 import { Store, Keys } from '../common/Store';
 
 /** 用户信息 */
@@ -61,39 +61,90 @@ export class AuthService {
     return out;
   }
 
-  /** 读取本地设备 ID（无则生成并持久化） */
+  /**
+   * 读取本地设备 ID（无则生成并持久化）
+   *
+   * ⚠️ **device_id 必须长期稳定**，理由见 `login()` 的注释：
+   *    每次全新随机 = 风控眼里的「陌生设备」，直接拉高
+   *    `RISK_DEVICE_DETECTED` 的概率。这里只在首次生成时落盘，
+   *    之后（含重装前的同一次安装周期内）一直复用。
+   */
   static async ensureDeviceId(): Promise<string> {
     let did: string = await Store.get(Keys.DEVICE_ID, '');
     if (did.length === 0) {
       did = AuthService.makeDeviceId();
       await Store.put(Keys.DEVICE_ID, did);
     }
+    // 回填同步缓存，供 Http.buildHeaders 使用（避免每个请求都 await Preferences）
+    DeviceIdCache.set(did);
     return did;
+  }
+
+  /**
+   * 预热设备 ID 缓存
+   *
+   * 应用启动时调一次即可。否则「冷启动后第一个请求」会在
+   * 缓存为空的状态下发出（不带 x-ds-device-id 头），
+   * 在风控敏感的网络下这一次请求最容易被打回。
+   */
+  static async warmUp(): Promise<void> {
+    await AuthService.ensureDeviceId();
   }
 
   /**
    * 密码登录
    * @param account 手机号（11 位）或邮箱
    * @param password 密码
+   *
+   * ⚠️ 关于 `RISK_DEVICE_DETECTED`（biz_code=11）—— 2026-09-18 定位
+   *
+   *   现象：用户走代理出口时 App 稳定报「当前网络环境有风险」，
+   *        但**手表自带浏览器访问 chat.deepseek.com 完全正常，且登录态长期保持**。
+   *
+   *   结论：被拦的不是「网络」，是「这个请求看起来不像正常客户端」。两个原因：
+   *     1. **登录体缺字段**。web 客户端会同时送
+   *        `device_name` / `device_model` / `token` / `platform`，
+   *        服务端据此给设备做可信度评分；本项目早期只发了 `device_id`，
+   *        风控视角就是「自称 web 的客户端连设备名都报不出来」。
+   *     2. **UA 不像任何真实浏览器**。旧 UA 自称 Mozilla/Safari 却没有版本号，
+   *        与「脚本客户端」强相关。已改为结构完整的移动端 Chrome UA
+   *        （见 `DsHeader.USER_AGENT`）。
+   *
+   *   为什么浏览器没事：浏览器有**长期稳定的设备指纹 + Cookie 会话**，
+   *   是「可信设备」；而 App 每次全新安装都会生成一个**新的随机 device_id**，
+   *   又没有 Cookie 可复用，风控眼里就是「陌生设备从可疑出口登录」。
+   *   所以关键修法不是换网络，而是 **让 device_id 稳定、把设备字段补齐**。
+   *   `ensureDeviceId()` 已做持久化，**不要**改成每次登录重新随机。
    */
   static async login(account: string, password: string): Promise<LoginResult> {
     const did: string = await AuthService.ensureDeviceId();
     const isEmail: boolean = account.indexOf('@') > 0;
 
+    // ★ 设备字段必须与 device_id 一起给出（缺任一项都会拉低设备可信度）
     const payload: Record<string, string> = {
       'email': isEmail ? account : '',
       'mobile': isEmail ? '' : account,
       'password': password,
       'area_code': '+86',
       'device_id': did,
+      'device_name': DsDevice.DEFAULT_NAME,
+      'device_model': DsDevice.DEFAULT_MODEL,
+      // 这个 token 是「人机验证 token」，密码登录流程没有验证码 → 空串
+      'token': '',
+      'platform': DsDevice.PLATFORM,
       'os': 'web'
     };
+
+    // 请求头也带上设备/平台标识，与 body 保持同一套「自称」
+    const extra: Record<string, string> = {};
+    extra[DsHeader.DEVICE_ID] = did;
+    extra[DsHeader.PLATFORM] = DsDevice.PLATFORM;
 
     const res: DsResponse = await Http.postJson(
       DsApi.ORIGIN + DsApi.LOGIN,
       JSON.stringify(payload),
       null,
-      null
+      extra
     );
 
     if (res.code === -1) {
@@ -108,7 +159,17 @@ export class AuthService {
       return { ok: false, message: '账号或密码错误', user: null };
     }
     if (bizCode === LoginBizCode.RISK_DEVICE) {
-      return { ok: false, message: '当前网络环境有风险，请切换网络后重试', user: null };
+      // ★ 这条文案必须给出「下一步做什么」。
+      //   风控是**出口 IP 不可信**与**设备字段不全**叠加的结果，
+      //   光说「请切换网络」会让用户反复重试到崩溃，还以为是 App 坏了。
+      //   实测最有效的解法是「先用手机/电脑浏览器在同一个出口登录一次」，
+      //   服务端会把这个出口标记为可信，之后手表端再登录就通过了。
+      return {
+        ok: false,
+        message: '当前网络出口被 DeepSeek 风控拦截。'
+          + '请用手机或电脑浏览器在本网络下先登录一次 deepseek.com，再回到手表重试',
+        user: null
+      };
     }
     if (bizCode !== LoginBizCode.OK) {
       const bm: string = res.data.biz_msg;

@@ -2,7 +2,7 @@
  * 回归测试：把 ArkTS 版 SseClient 的 patch 解析逻辑（片段类型追踪 + SET/APPEND 语义）
  * 1:1 移植到 JS，喂入几种真实的 SSE 帧序列，断言正文分派结果正确。
  *
- * 覆盖 8 种形态：
+ * 覆盖 10 种形态：
  *   A. 首帧全量 + response/fragments/<idx>/content 增量（当前线上主形态）
  *   B. thinking/content + response/content 前缀形态（老版本）
  *   C. 只有 fragments 数组帧 + fragments/-1/content（无首帧）
@@ -11,6 +11,8 @@
  *   F. 工具片段与不可展示片段（REQUEST/FILE/TIP 过滤）
  *   G. 首帧就带完整 content（SET 语义）→ 输出全文，且后续 APPEND 不重复
  *   H. fragments 数组 APPEND 帧自带首段 content → 与后续增量正确拼接
+ *   I. 从首帧 response 对象提取 message_id（Bug 16 的修复依赖它）
+ *   J. 零帧挂死判定条件（Bug 17 看门狗的判据）
  *
  * 运行：node tools/sse-parser-test.mjs
  */
@@ -28,6 +30,11 @@ const FragmentType = {
 
 // ---------------- 被测逻辑（从 SseClient.ets 移植） ----------------
 class MiniSse {
+  /** 与 SseClient.lastMessageId 对应的静态去重状态 */
+  static lastMessageId = '';
+  /** 本次测试收集到的 message_id 上报序列 */
+  static messageIds = [];
+
   constructor() {
     this.lastPath = '';
     this.lastOp = '';
@@ -129,6 +136,8 @@ class MiniSse {
 
   absorbStructValue(v, op) {
     if (typeof v !== 'object' || v === null) return;
+    // ★ 新增：从 response 对象里捞 message_id（Bug 16 的修复依赖它）
+    MiniSse.pickMessageId(v);
     const direct = v['fragments'];
     if (direct !== undefined && direct !== null && Array.isArray(direct)) {
       this.absorbFragmentArray(direct, op);
@@ -137,12 +146,31 @@ class MiniSse {
     for (const k of ['response', 'thinking', 'search']) {
       const inner = v[k];
       if (inner === undefined || inner === null || typeof inner !== 'object') continue;
+      MiniSse.pickMessageId(inner);
       const fs = inner['fragments'];
       if (fs !== undefined && fs !== null && Array.isArray(fs)) {
         this.absorbFragmentArray(fs, op);
         return;
       }
     }
+  }
+
+  /**
+   * 移植自 SseClient.pickMessageId
+   *
+   * 服务端首帧的 response 对象里带 message_id，这是后续
+   * `stop_stream` 唯一能用的凭据（下一轮发送前用它清僵尸流）。
+   * 兼容 message_id / messageId / id 三种命名。
+   */
+  static pickMessageId(o) {
+    if (!o || typeof o !== 'object') return;
+    let mid = MiniSse.pickStr(o, 'message_id');
+    if (mid.length === 0) mid = MiniSse.pickStr(o, 'messageId');
+    if (mid.length === 0) mid = MiniSse.pickStr(o, 'id');
+    if (mid.length === 0) return;
+    if (mid === MiniSse.lastMessageId) return;
+    MiniSse.lastMessageId = mid;
+    MiniSse.messageIds.push(mid);
   }
 
   absorbStructValueAtPath(path, op, v) {
@@ -362,6 +390,58 @@ console.log('用例 H：fragments 数组 APPEND 帧自带首段 content，需与
     'data: {"p":"response/fragments/-1/content","o":"APPEND","v":"结尾"}\n\n'
   );
   check('拼接为开头+结尾', s.joined(), { RESPONSE: '开头结尾' });
+}
+
+// ---------------- 用例 I：message_id 提取（Bug 16 依赖） ----------------
+console.log('用例 I：从首帧 response 对象提取 message_id');
+{
+  MiniSse.lastMessageId = '';
+  MiniSse.messageIds = [];
+  const s = new MiniSse();
+  s.feed(
+    'data: {"p":"","o":"SET","v":{"response":{"message_id":"srv-abc-123",' +
+    '"fragments":[{"id":1,"type":"RESPONSE","content":"hi"}]}}}\n\n'
+  );
+  check('提取到 message_id', MiniSse.messageIds, ['srv-abc-123']);
+}
+{
+  // 同一 id 反复出现只上报一次（避免每帧都触发回调）
+  MiniSse.lastMessageId = '';
+  MiniSse.messageIds = [];
+  const s = new MiniSse();
+  s.feed(
+    'data: {"p":"","o":"SET","v":{"response":{"message_id":"same-id","fragments":[]}}}\n\n' +
+    'data: {"p":"","o":"SET","v":{"response":{"message_id":"same-id","fragments":[]}}}\n\n'
+  );
+  check('同一 message_id 只上报一次', MiniSse.messageIds, ['same-id']);
+}
+{
+  // 兼容 camelCase 命名
+  MiniSse.lastMessageId = '';
+  MiniSse.messageIds = [];
+  const s = new MiniSse();
+  s.feed('data: {"p":"","o":"SET","v":{"response":{"messageId":"camel-1","fragments":[]}}}\n\n');
+  check('兼容 messageId 命名', MiniSse.messageIds, ['camel-1']);
+}
+{
+  // 裸 id 命名（部分版本）
+  MiniSse.lastMessageId = '';
+  MiniSse.messageIds = [];
+  const s = new MiniSse();
+  s.feed('data: {"p":"","o":"SET","v":{"response":{"id":"bare-1","fragments":[]}}}\n\n');
+  check('兼容裸 id 命名', MiniSse.messageIds, ['bare-1']);
+}
+
+// ---------------- 用例 J：零帧挂死判定（Bug 17 的判定条件） ----------------
+console.log('用例 J：零帧挂死判定条件');
+{
+  // 复刻 SseClient 看门狗的判定：45s 内 frameCount===0 → 判 stalled
+  const STALL_MS = 45000;
+  const judge = (idleMs, frameCount) =>
+    ((idleMs >= STALL_MS && frameCount === 0) ? 'stalled' : 'wait');
+  check('45s 零帧 → stalled', judge(45001, 0), 'stalled');
+  check('45s 已有数据 → 只等待（长思考静默期不打断）', judge(45001, 12), 'wait');
+  check('30s 零帧 → 还不到阈值', judge(30000, 0), 'wait');
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

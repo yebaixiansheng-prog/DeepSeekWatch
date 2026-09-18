@@ -4,6 +4,7 @@ import { BusinessError } from '@ohos.base';
 import { Store } from '../common/Store';
 import { Round } from '../common/RoundScreen';
 import { DeepSeekHash } from '../common/DeepSeekHash';
+import { AuthService } from '../model/AuthService';
 
 const TAG: string = 'Boot';
 
@@ -17,6 +18,15 @@ export default class EntryAbility extends UIAbility {
     //   查看： hdc shell "hilog -x | grep Boot"
     const ok: boolean = DeepSeekHash.selfTest();
     console.info(TAG + ' selfTest=' + (ok ? 'PASS' : 'FAIL'));
+
+    // ★ 预热设备 ID 同步缓存：让「冷启动后第一个请求」就能带上
+    //   x-ds-device-id 头。否则那个请求是不带设备标识的，
+    //   在风控敏感的网络出口下最容易被打回。
+    AuthService.warmUp().then(() => {
+      console.info(TAG + ' deviceId ready');
+    }).catch((e: BusinessError) => {
+      console.warn(TAG + ' deviceId warmUp failed: ' + e.message);
+    });
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {

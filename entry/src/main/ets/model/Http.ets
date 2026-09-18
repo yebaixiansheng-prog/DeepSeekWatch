@@ -1,5 +1,5 @@
 import http from '@ohos.net.http';
-import { DsHeader, DsCode } from '../common/Constants';
+import { DsDevice, DsHeader, DsCode } from '../common/Constants';
 
 /** 统一响应包 */
 export interface DsResponse {
@@ -12,6 +12,26 @@ export interface DsData {
   biz_code: number;
   biz_msg: string;
   biz_data: object | null;
+}
+
+/**
+ * 设备 ID 的**同步**缓存
+ *
+ * 为什么需要它：`buildHeaders()` 是同步函数，而读取 device_id 要走
+ * Preferences（异步）。为了不在每个请求里 await，这里维护一份内存缓存，
+ * 由 `AuthService.ensureDeviceId()` 在首次落盘时回填。
+ * 缓存为空时**不发这个头**（发空串比不发更可疑）。
+ */
+export class DeviceIdCache {
+  private static value: string = '';
+
+  static set(id: string): void {
+    DeviceIdCache.value = id;
+  }
+
+  static get(): string {
+    return DeviceIdCache.value;
+  }
 }
 
 /**
@@ -38,6 +58,15 @@ export class Http {
       'Accept': '*/*',
       'User-Agent': DsHeader.USER_AGENT
     };
+    // ★ 所有请求都带设备/平台标识（不再只有登录请求带）。
+    //   风控是按「会话+设备」维度累计评分的：只在登录时自称是 web、
+    //   后续请求却什么都不带，反而更像脚本。这里保持全程一致。
+    //   注意 ensureDeviceId 是异步的，这里用同步读取的缓存值（见 DeviceIdCache）。
+    const did: string = DeviceIdCache.get();
+    if (did.length > 0) {
+      h[DsHeader.DEVICE_ID] = did;
+    }
+    h[DsHeader.PLATFORM] = DsDevice.PLATFORM;
     if (token !== null && token.length > 0) {
       h[DsHeader.AUTH] = 'Bearer ' + token;
     }

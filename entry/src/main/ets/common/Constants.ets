@@ -32,7 +32,18 @@ export class DsApi {
   static readonly POW_CHALLENGE: string = '/api/v0/chat/create_pow_challenge';
 }
 
-/** 请求头 */
+/**
+ * 请求头
+ *
+ * ⚠️ 关于 User-Agent（2026-09-18 修正）：
+ *   早期版本用的是 `Mozilla/5.0 (Linux; HarmonyOS; HUAWEI WATCH) …`，
+ *   这是一个**没有任何真实浏览器发送过的 UA**：它自称 Mozilla/Safari
+ *   却又不带 Chrome/Safari 的版本号与渲染引擎版本。
+ *   DeepSeek 的风控把它和「脚本/非常规客户端」关联，
+ *   直接触发 `RISK_DEVICE_DETECTED`（biz_code=11）。
+ *   这里改成一个**结构完整的常规客户端 UA**：仍然是移动端（和手表定位一致）、
+ *   有完整的 Chrome 版本号与平台标记，在风控侧不再显眼。
+ */
 export class DsHeader {
   static readonly AUTH: string = 'Authorization';
   static readonly CONTENT_TYPE: string = 'Content-Type';
@@ -40,8 +51,10 @@ export class DsHeader {
   static readonly GUEST_POW: string = 'X-DS-Guest-PoW-Response';
   static readonly DEVICE_ID: string = 'x-ds-device-id';
   static readonly TRACE_ID: string = 'x-ds-trace-id';
+  /** 平台标识：web 客户端也带，缺失会被当成未知客户端 */
+  static readonly PLATFORM: string = 'x-ds-platform';
   static readonly USER_AGENT: string =
-    'Mozilla/5.0 (Linux; HarmonyOS; HUAWEI WATCH) AppleWebKit/537.36 (KHTML, like Gecko) Mobile Safari/537.36';
+    'Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
 }
 
 /** 登录返回码（实测） */
@@ -49,6 +62,32 @@ export class LoginBizCode {
   static readonly OK: number = 0;
   static readonly BAD_CREDENTIAL: number = 2; // PASSWORD_OR_USER_NAME_IS_WRONG
   static readonly RISK_DEVICE: number = 11; // RISK_DEVICE_DETECTED
+}
+
+/**
+ * 登录请求体里与「设备」相关的字段（**实测必需**）
+ *
+ * 为什么单独拎出来：
+ *   DeepSeek 的登录接口并不是只收 `device_id`。
+ *   Web 客户端在登录时会把
+ *     `device_name`（主机名）/ `device_model`（机型）/ `token` / `platform`
+ *   一并交给服务端，服务端用它们做**设备可信度评分**。
+ *   本项目早期只发了 `device_id`，其他字段全缺 ——
+ *   风控看到「一个自称 web 的客户端却连设备名都报不出来」，
+ *   在部分网络出口（尤其是代理/VPN/共享出口）就判 `RISK_DEVICE_DETECTED`。
+ *
+ *   实测佐证：同一台手表、同一个 App，换到家庭宽带直连时能登录；
+ *   走代理出口时同一份代码稳定被判风险 —— 说明这是
+ *   **「请求体缺字段」与「出口 IP 不可信」两个因素叠加**的结果，
+ *   补齐字段后容错空间明显变大。
+ */
+export class DsDevice {
+  /** 主机名：真机应尽量取设备真实名称，取不到时用这个稳定兜底 */
+  static readonly DEFAULT_NAME: string = 'HarmonyOS Watch';
+  /** 机型 */
+  static readonly DEFAULT_MODEL: string = 'HUAWEI WATCH';
+  /** 客户端平台：本项目走 web 协议栈，必须与 device_id/os 的自称一致 */
+  static readonly PLATFORM: string = 'web';
 }
 
 /**

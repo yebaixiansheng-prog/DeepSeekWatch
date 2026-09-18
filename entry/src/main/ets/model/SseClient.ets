@@ -9,6 +9,15 @@ const TAG: string = 'SseClient';
 export interface SseCallbacks {
   onReady?: () => void;
   onSessionId?: (id: string) => void;
+  /**
+   * 服务端为本轮分配的 message_id（首帧的 response 对象里带）
+   *
+   * ⚠️ 它的唯一用途是 `stop_stream`：
+   *    本地 `abort()` 只断 HTTP 连接，服务端那条流还在跑。
+   *    这些「僵尸流」会让下一次请求被排队挂死 ——
+   *    所以下一轮发送前要拿这个 id 去把上一条流停掉。
+   */
+  onMessageId?: (id: string) => void;
   onDelta?: (fragType: string, content: string, fragmentId: string) => void;
   onHint?: (text: string) => void;
   onToast?: (text: string) => void;
@@ -67,6 +76,28 @@ export class SseClient {
   private textLen: number = 0;
   private seenPaths: string = '';
 
+  /**
+   * 静默看门狗
+   *
+   * ★ 为什么必须有它（2026-09-18，「聊两轮就再也发不出去」的兜底）：
+   *   服务端在 `preempt:false` 排队、或网关把请求挂住时，
+   *   HTTP 连接是**建立成功**的，`requestInStream` 也返回了，
+   *   但此后**一个字节都不来**，`dataEnd` 也永远不触发。
+   *   客户端于是无限期停在「准备中…」，用户完全无法判断发生了什么 ——
+   *   这就是他说的「反正就不能对话了」。
+   *
+   *   看门狗定时检查「距上次收到数据过了多久」：
+   *     - 超过 STALL_MS 还是零帧 → 判定为被挂起，主动 abort 并报 stall
+   *     - 超过 STALL_MS 且已经收过数据 → 只告警不打断（长思考的静默期可能很久）
+   */
+  private lastDataAt: number = 0;
+  private watchdogTimer: number = -1;
+
+  /** 无数据静默上限：超过就认定服务端把请求挂住了 */
+  private static readonly STALL_MS: number = 45000;
+  /** 看门狗检查间隔 */
+  private static readonly WATCH_INTERVAL_MS: number = 5000;
+
   /** 发起流式对话 */
   async start(url: string, body: string, token: string,
     headers: Record<string, string>, cb: SseCallbacks): Promise<void> {
@@ -83,6 +114,8 @@ export class SseClient {
     this.frameCount = 0;
     this.textLen = 0;
     this.seenPaths = '';
+    this.lastDataAt = Date.now();
+    this.startWatchdog(cb);
 
     const h: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -99,6 +132,7 @@ export class SseClient {
       if (this.aborted) {
         return;
       }
+      this.lastDataAt = Date.now();
       const chunk: string = SseClient.decode(data);
       this.buffer += chunk;
       this.consume(cb);
@@ -145,11 +179,52 @@ export class SseClient {
       return;
     }
     this.finished = true;
+    this.stopWatchdog();
     // ★ 诊断：这条日志能一眼区分「服务端没回内容」和「回了但解析丢了」
     hilog.info(0x0001, TAG, 'sse DONE frames=%{public}d textLen=%{public}d paths=%{public}s',
       this.frameCount, this.textLen, this.seenPaths);
     if (!this.aborted && cb.onFinish) {
       cb.onFinish();
+    }
+  }
+
+  // ==================================================================
+  //   静默看门狗
+  // ==================================================================
+
+  private startWatchdog(cb: SseCallbacks): void {
+    this.stopWatchdog();
+    this.watchdogTimer = setInterval(() => {
+      if (this.finished || this.aborted) {
+        this.stopWatchdog();
+        return;
+      }
+      const idle: number = Date.now() - this.lastDataAt;
+      if (idle < SseClient.STALL_MS) {
+        return;
+      }
+      if (this.frameCount === 0) {
+        // 一帧都没来 → 服务端把请求挂住了（典型：preempt 排队 / 网关挂死）
+        hilog.error(0x0001, TAG,
+          'sse STALLED no frame in %{public}dms, aborting', idle);
+        this.stopWatchdog();
+        this.aborted = true;
+        this.dispose();
+        if (cb.onError) {
+          cb.onError('stalled');
+        }
+        return;
+      }
+      // 已经收过数据，只是暂时安静（长思考）→ 只告警，不打断
+      hilog.warn(0x0001, TAG,
+        'sse quiet %{public}dms (frames=%{public}d) — still waiting', idle, this.frameCount);
+    }, SseClient.WATCH_INTERVAL_MS);
+  }
+
+  private stopWatchdog(): void {
+    if (this.watchdogTimer >= 0) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = -1;
     }
   }
 
@@ -294,6 +369,12 @@ export class SseClient {
       return;
     }
     const vo: Record<string, Object> = v as Record<string, Object>;
+
+    // ★ 顺带捞「服务端为这一轮分配的 message_id」。
+    //   首帧的 response 对象里带 message_id，这是后续
+    //   `stop_stream` 唯一能用的凭据（下一轮发送前用它清僵尸流）。
+    SseClient.pickMessageId(vo, cb);
+
     // 形态一：v 自己就是带 fragments 的对象
     const direct: Object | undefined = vo['fragments'];
     if (direct !== undefined && direct !== null && Array.isArray(direct)) {
@@ -308,12 +389,39 @@ export class SseClient {
         continue;
       }
       const io: Record<string, Object> = inner as Record<string, Object>;
+      SseClient.pickMessageId(io, cb);
       const fs: Object | undefined = io['fragments'];
       if (fs !== undefined && fs !== null && Array.isArray(fs)) {
         this.absorbFragmentArray(fs as Object[], op, cb);
         return;
       }
     }
+  }
+
+  /**
+   * 从 response 对象里取 message_id 并回调
+   *
+   * 兼容 `message_id` / `messageId` / `id` 三种命名（不同版本服务端用过不同键），
+   * 且只在拿到非空值、且与上次上报不同时才回调（避免每帧都触发）。
+   */
+  private static lastMessageId: string = '';
+
+  private static pickMessageId(o: Record<string, Object>, cb: SseCallbacks): void {
+    if (cb.onMessageId === undefined) {
+      return;
+    }
+    let mid: string = SseClient.pickStr(o, 'message_id');
+    if (mid.length === 0) {
+      mid = SseClient.pickStr(o, 'messageId');
+    }
+    if (mid.length === 0) {
+      mid = SseClient.pickStr(o, 'id');
+    }
+    if (mid.length === 0 || mid === SseClient.lastMessageId) {
+      return;
+    }
+    SseClient.lastMessageId = mid;
+    cb.onMessageId(mid);
   }
 
   /** 处理带 fragments 路径的结构帧 */
@@ -634,6 +742,7 @@ export class SseClient {
   }
 
   private dispose(): void {
+    this.stopWatchdog();
     if (this.request !== null) {
       try {
         this.request.destroy();

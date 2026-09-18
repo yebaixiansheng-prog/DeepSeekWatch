@@ -153,7 +153,8 @@ let sawFinish = false;
     ref_file_ids: [],
     thinking_enabled: false,
     search_enabled: false,
-    preempt: false,
+    // ★ 与 App 保持一致：抢占语义。false 会在「上一轮流未结束」时被服务端排队挂死。
+    preempt: true,
   });
 
   const t0 = Date.now();
@@ -237,6 +238,136 @@ console.log('【4】历史消息回读');
   console.log(info(`取回 ${msgs.length} 条消息`));
 }
 console.log('');
+
+// ============================================================================
+// 【5】多轮连续对话 —— 专门盯「聊两轮之后再也发不出去」
+//
+// 为什么要单独一个用例：
+//   用户反馈「对话超过两次之后就达上限、无法继续」。这个现象只在
+//   **同一个会话里连续多轮**才会出现，单轮用例永远测不到。
+//   根因是 `preempt:false` 的排队语义 + 服务端残留的僵尸流：
+//   第 3 轮开始请求会被挂在服务端，客户端一帧都收不到。
+//
+//   本用例连发 3 轮并逐轮打印 code / 帧数 / 耗时。
+//   判定标准：**每一轮都必须在 timeout 内收到帧**。
+//   如果第 N 轮 0 帧且超时 → 复现成功，说明 preempt 仍是 false。
+// ============================================================================
+if (!process.env.SKIP_MULTITURN) {
+  console.log('【5】多轮连续对话（复现 / 回归「聊两轮后就发不出去」）');
+  const ROUNDS = 3;
+  const PER_ROUND_MS = 60000;
+  let prevAssistantId = null;
+
+  for (let round = 1; round <= ROUNDS; round++) {
+    const ask = `第${round}轮：只回复数字 ${round}`;
+    const powR = await fetch(ORIGIN + '/api/v0/chat/create_pow_challenge', {
+      method: 'POST', headers: H,
+      body: JSON.stringify({ target_path: '/api/v0/chat/completion' }),
+    });
+    const powJ = await powR.json();
+    if (powJ.code !== 0) { check(`第 ${round} 轮取 PoW`, false, `code=${powJ.code}`); break; }
+    const c = powJ.data.biz_data.challenge;
+    const { DeepSeekHash } = await loadDeepSeekHash();
+    const answer = DeepSeekHash.searchRange(
+      `${c.salt}_${c.expire_at}_`, c.challenge, 0, c.difficulty);
+    const powB64 = Buffer.from(JSON.stringify({
+      algorithm: c.algorithm, challenge: c.challenge, salt: c.salt,
+      answer, signature: c.signature, target_path: '/api/v0/chat/completion',
+    })).toString('base64');
+
+    const bodyObj = {
+      chat_session_id: sessionId,
+      prompt: ask,
+      ref_file_ids: [],
+      thinking_enabled: false,
+      search_enabled: false,
+      // ★ 与 App 保持一致：必须是 true。改成 false 就能复现挂死。
+      preempt: true,
+      model_type: 'default',
+    };
+    if (prevAssistantId) { bodyObj.parent_message_id = prevAssistantId; }
+
+    const t0 = Date.now();
+    let r;
+    try {
+      r = await fetch(ORIGIN + '/api/v0/chat/completion', {
+        method: 'POST',
+        headers: { ...H, 'Accept': 'text/event-stream', 'X-DS-PoW-Response': powB64 },
+        body: JSON.stringify(bodyObj),
+        signal: AbortSignal.timeout(PER_ROUND_MS),
+      });
+    } catch (e) {
+      check(`第 ${round} 轮收到响应`, false,
+        `挂死/超时 ${Date.now() - t0}ms（${e.name}）← 这就是「发不出去」的现象`);
+      break;
+    }
+
+    // 边读边计时，超时就判挂死
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '', roundFrames = 0, roundErr = null, newMsgId = null, sawDone = false;
+    const tRead = Date.now();
+    try {
+      while (true) {
+        if (Date.now() - tRead > PER_ROUND_MS) { throw new Error('read_timeout'); }
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).replace(/\r$/, '');
+          buf = buf.slice(nl + 1);
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (!payload) continue;
+          roundFrames++;
+          let obj; try { obj = JSON.parse(payload); } catch { continue; }
+          if (typeof obj.code === 'number' && obj.code !== 0) roundErr = obj;
+          // 首帧 response 对象里的 message_id —— 下一轮 parent 要用它
+          const resp = obj.v?.response ?? obj.v;
+          if (resp && typeof resp === 'object') {
+            if (resp.message_id || resp.messageId || resp.id) {
+              newMsgId = resp.message_id || resp.messageId || resp.id;
+            }
+          }
+          if (obj.v && obj.v.status === 'FINISHED') sawDone = true;
+          if (obj.p === 'response' && obj.o === 'SET' && obj.v?.status === 'FINISHED') sawDone = true;
+        }
+      }
+    } catch (e) {
+      roundErr = { code: 'LOCAL', msg: e.message };
+    }
+
+    const ms = Date.now() - t0;
+    if (roundErr && roundErr.code !== 'LOCAL') {
+      check(`第 ${round} 轮`, false, `服务端错误 code=${roundErr.code} msg=${roundErr.msg}`);
+      break;
+    }
+    check(`第 ${round} 轮收到流式数据`, roundFrames > 0,
+      `帧数=${roundFrames} 耗时=${ms}ms ${sawDone ? '已结束' : '未收到结束态'}`);
+    if (roundFrames === 0) {
+      console.log(info('⚠ 复现成功：服务端接受了连接但一个字节都没回。'));
+      console.log(info('  检查 completion 请求体里的 preempt 是否为 true。'));
+      break;
+    }
+    if (newMsgId) {
+      prevAssistantId = newMsgId;
+      console.log(info(`  ↑ 服务端 message_id=${newMsgId.slice(0, 12)}…（下一轮 parent_message_id）`));
+    } else {
+      // 拿不到 id 就用历史接口取最近一条 assistant id，保证链路连续
+      try {
+        const hr = await fetch(ORIGIN + '/api/v0/chat/history_messages?chat_session_id=' + sessionId,
+          { method: 'GET', headers: H });
+        const hj = await hr.json();
+        const msgs = hj.data?.biz_data?.chat_messages ?? [];
+        const lastA = [...msgs].reverse().find((m) => m.role === 'ASSISTANT');
+        if (lastA) prevAssistantId = lastA.id;
+        console.log(info(`  ↑ 从历史接口取到 parent=${String(prevAssistantId).slice(0, 12)}…`));
+      } catch { /* 拿不到就下一轮不带 parent，不影响挂死判定 */ }
+    }
+  }
+  console.log('');
+}
 
 // ------------------------------------------------------------- 汇总
 if (failures === 0) {

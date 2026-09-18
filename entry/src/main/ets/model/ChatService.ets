@@ -98,10 +98,45 @@ export interface ChatCallbacks {
 export class ChatService {
   private sse: SseClient | null = null;
 
+  /**
+   * 上一次对话的 session / message id
+   *
+   * 用途：下一轮发送前主动给服务端发 `stop_stream`，
+   *      清掉可能还在跑的「僵尸流」（本地断了、服务端没断）。
+   *      这是 `preempt:true` 之外的第二道保险。
+   */
+  private lastSessionId: string = '';
+  private lastMessageId: string = '';
+
+  /** 记录本轮请求在服务端产生的 message_id（供 stop 使用） */
+  private rememberTurn(sessionId: string, messageId: string): void {
+    if (messageId.length > 0) {
+      this.lastSessionId = sessionId;
+      this.lastMessageId = messageId;
+    }
+  }
+
+  /** 清掉记录的僵尸流信息（会话已经干净结束时调用） */
+  private clearTurn(): void {
+    this.lastSessionId = '';
+    this.lastMessageId = '';
+  }
+
   /** 发起一次对话 */
   async send(token: string, p: ChatParams, targetPath: string, cb: ChatCallbacks): Promise<void> {
     // 0. 先清掉可能还挂着的旧流，避免重试时两条流同时往 UI 灌内容
     this.abortStream();
+
+    // 0.5 ★ 服务端「僵尸流」清场
+    //     本地 abort() 只是断开 HTTP 连接，**服务端那条流还在跑**。
+    //     如果再叠加 `preempt:false`，新请求会被排队挂死
+    //     （这就是「聊两轮之后再也发不出去」的成因，详见下方 preempt 注释）。
+    //     现在双保险：① preempt:true 由服务端抢占；② 主动通知上一轮停流。
+    //     这里用 fire-and-forget：停流失败不影响新请求（preempt 已经兜住了）。
+    if (this.lastSessionId.length > 0 && this.lastMessageId.length > 0) {
+      this.stop(token, this.lastSessionId, this.lastMessageId).catch(() => {
+      });
+    }
 
     // 1. 准备 PoW
     let powHeader: string | null = null;
@@ -118,16 +153,31 @@ export class ChatService {
     }
 
     // 2. 构造请求体
-    // 注意：ArkTS 不允许把 string|null 直接放进 Record<string, Object>，
-    // 也无法表达 JSON null；服务端对 parent_message_id 缺失与 null 处理一致，
-    // 因此仅在非 null 时写入该字段。
+    //
+    // ★★★ preempt 必须是 **true** —— 这是「聊两轮就再也发不出去」的真凶 ★★★
+    //
+    //   实测 + 线上 bundle 行为对照（2026-09-18）：
+    //     `preempt:false` = **排队**语义。服务端发现这个 session 上还有一条
+    //     未结束的流（哪怕是上一轮「网络抖动后本地已放弃、服务端还在跑」的僵尸流），
+    //     就会把新请求**挂在队列里**，既不回 SSE 数据、也不报错。
+    //     → 客户端表现为：连接建立（HTTP 200）、一直空等、`onFinish` 永不到达、
+    //       状态永远停在「准备中…」，用户看到的就是「它不能对话了」。
+    //     `preempt:true` = **抢占**语义：服务端先终止该 session 上的旧流，
+    //     再开始新一轮。这正是官方 web 客户端「发送」按钮的行为。
+    //
+    //   为什么偏偏「两次之后」中招：
+    //     第 1 轮正常结束 → 干净；第 2 轮如果用户中途退出页面 / 掉网 / 息屏，
+    //     服务端那条流并不会立刻结束，于是第 3 轮开始就撞上排队。
+    //     只要有一轮没干净收尾，之后就**永远**好不了 —— 与用户描述完全一致。
+    //
+    //   ⚠️ ArkTS 无法表达 JSON null，`parent_message_id` 只在非 null 时写入。
     const bodyObj: Record<string, Object> = {
       'chat_session_id': p.sessionId,
       'prompt': p.prompt,
       'ref_file_ids': [],
       'thinking_enabled': p.thinkingEnabled,
       'search_enabled': p.searchEnabled,
-      'preempt': false,
+      'preempt': true,
       'model_type': p.modelType
     };
     if (p.parentMessageId !== null) {
@@ -148,6 +198,10 @@ export class ChatService {
         if (cb.onSessionCreated) {
           cb.onSessionCreated(id);
         }
+      },
+      onMessageId: (id: string) => {
+        // 记下服务端为这一轮分配的 message_id：下一轮发送前要靠它停掉僵尸流
+        this.rememberTurn(p.sessionId, id);
       },
       onDelta: (fragType: string, content: string, fragmentId: string) => {
         if (fragType === FragmentType.THINK) {
@@ -175,6 +229,8 @@ export class ChatService {
         }
       },
       onFinish: () => {
+        // 这一轮干净结束了 → 不需要再向服务端停流
+        this.clearTurn();
         if (cb.onFinish) {
           cb.onFinish();
         }
@@ -189,14 +245,35 @@ export class ChatService {
     await client.start(DsApi.ORIGIN + targetPath, JSON.stringify(bodyObj), token, extra, sseCb);
   }
 
-  /** 停止生成 */
+  /**
+   * 停止生成
+   *
+   * ⚠️ `messageId` **不能留空**（2026-09-18 修正）：
+   *    旧调用方传的是 `''`，服务端收到空 id 会直接忽略这个请求，
+   *    结果是「本地以为停了、服务端还在跑」——
+   *    这些残留流会在下一轮把新请求排队挂死，
+   *    正是「聊两轮之后再也发不出去」的链条起点。
+   *
+   *    现在传空时自动回退到最近一次记录的 message_id；
+   *    两者都没有才放弃（此时通常本来就没有流在跑）。
+   */
   async stop(token: string, sessionId: string, messageId: string): Promise<void> {
     this.abortStream();
+    const sid: string = sessionId.length > 0 ? sessionId : this.lastSessionId;
+    let mid: string = messageId;
+    if (mid.length === 0) {
+      mid = this.lastMessageId;
+    }
+    if (sid.length === 0 || mid.length === 0) {
+      // 没有可停的目标：不浪费一次请求
+      return;
+    }
     const body: string = JSON.stringify({
-      'chat_session_id': sessionId,
-      'message_id': messageId
+      'chat_session_id': sid,
+      'message_id': mid
     });
     await Http.postRaw(DsApi.ORIGIN + DsApi.STOP_STREAM, body, token, null);
+    this.clearTurn();
   }
 
   /**

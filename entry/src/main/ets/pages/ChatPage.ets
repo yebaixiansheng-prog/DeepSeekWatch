@@ -665,6 +665,7 @@ struct ChatPage {
     this.messages = list;
     this.sending = true;
     this.statusText = '准备中…';
+    this.startSendWatchdog(asstId);
 
     const params: ChatParams = {
       sessionId: this.sessionId,
@@ -800,6 +801,11 @@ struct ChatPage {
     if (code === 'stream_error') {
       return '网络中断，请重试';
     }
+    // ★ 服务端把请求挂住了：连接建立但一个字节都没回（典型是排队/网关挂死）。
+    //   必须给出「怎么解决」，只说失败用户会一直重试到崩溃。
+    if (code === 'stalled') {
+      return '服务端无响应（连接被挂起）。请重试；若反复出现，点左下角「＋」新建对话';
+    }
     // 服务端在 SSE 流里返回的业务错误（如 PoW 未通过）
     if (code.indexOf('srv_') === 0) {
       const c: string = code.substring(4);
@@ -811,6 +817,10 @@ struct ChatPage {
       }
       if (c === '40011' || c === '40012') {
         return '请求过于频繁，请稍后再试';
+      }
+      // 40303 = 该会话上有未结束的流（排队被拒）
+      if (c === '40303') {
+        return '上一轮回复未结束，请稍候重试';
       }
       return '服务端拒绝（' + c + '）';
     }
@@ -888,6 +898,8 @@ struct ChatPage {
     if (changed) {
       this.messages = list;
     }
+    // 所有结束路径都会汇到这里 → 统一撤掉发送看门狗
+    this.clearSendWatchdog();
     this.sending = false;
     this.statusText = '';
   }
@@ -902,11 +914,15 @@ struct ChatPage {
    * 停止生成
    *
    * ⚠️ 顺序很重要：必须先 abort 本地 SSE（否则事件还会继续灌进来），
-   *    再通知服务端停流。messageId 传空串兼容两种服务端实现。
+   *    再通知服务端停流。
+   *    `messageId` 传空串是**故意**的：ChatService.stop 会自动回退到
+   *    最近一次从 SSE 首帧记录下来的真实 message_id ——
+   *    传空串但内部回退，等价于「一定带对 id」，比调用方猜一个 id 可靠。
    */
   private async stopGeneration(): Promise<void> {
     this.sending = false;
     this.statusText = '已停止';
+    this.clearSendWatchdog();
     // 把当前助手消息标记为结束，避免光标一直闪
     const list: ChatMessage[] = this.messages.slice();
     for (let i = list.length - 1; i >= 0; i--) {
@@ -942,13 +958,59 @@ struct ChatPage {
     await Store.remove(Keys.LAST_SESSION);
   }
 
+  /**
+   * 发送看门狗
+   *
+   * ★ 兜住「sending 永久卡住」这一类现象（用户反馈的「就不能对话了」）：
+   *   SSE 层有自己的静默看门狗负责 abort 并报 `stalled`；
+   *   但万一连回调都没回来（极端网络下 SDK 不触发任何事件），
+   *   这里再兜一层**硬上限**：无论如何在 SEND_HARD_LIMIT_MS 后
+   *   强制把 UI 恢复到可再次输入的状态，并给出明确提示。
+   *
+   *   宁可多提示一次「超时了，请重试」，也不能让用户面对
+   *   一个永远转圈、再也点不动发送按钮的界面。
+   */
+  private sendTimer: number = -1;
+  private static readonly SEND_HARD_LIMIT_MS: number = 180000;
+
+  private startSendWatchdog(asstId: string): void {
+    this.clearSendWatchdog();
+    this.sendTimer = setTimeout(() => {
+      if (!this.sending) {
+        return;
+      }
+      this.chat.abortStream();
+      this.sending = false;
+      this.statusText = '';
+      this.updateAssistant(asstId, [
+        {
+          id: 'r-' + asstId, type: FragmentType.RESPONSE,
+          content: '⚠ 等待超时（3 分钟无结果）。请重试，或点「＋」新建对话',
+          status: FragStatus.FINISHED
+        }
+      ]);
+      this.finishAssistant(asstId);
+    }, ChatPage.SEND_HARD_LIMIT_MS);
+  }
+
+  private clearSendWatchdog(): void {
+    if (this.sendTimer >= 0) {
+      clearTimeout(this.sendTimer);
+      this.sendTimer = -1;
+    }
+  }
+
   aboutToDisappear(): void {
     // 离开页面：中断流并清理表冠累积
     this.followTail = false;
     Crown.reset();
     if (this.sending) {
+      // ★ 必须把 message_id 带上（ChatService.stop 会自动回退到最近一次记录的 id）。
+      //   传空串等于没停 —— 服务端那条流会继续跑，下一轮发送就会被排队挂死，
+      //   用户看到的现象就是「聊两轮之后它就不能对话了」。
       this.chat.stop(AuthService.getToken(), this.sessionId, '');
       this.sending = false;
     }
+    this.clearSendWatchdog();
   }
 }
