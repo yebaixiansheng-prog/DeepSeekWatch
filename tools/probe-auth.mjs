@@ -1,5 +1,7 @@
 // 探测：用非法 token 请求，观察服务端鉴权失败的响应形态
-const UA = 'Mozilla/5.0 (Linux; HarmonyOS; HUAWEI WATCH) AppleWebKit/537.36 (KHTML, like Gecko) Mobile Safari/537.36';
+// ★ UA 必须与 App 的 Constants.ets 一致，否则探到的响应形态不代表 App 会遇到什么
+const UA = 'Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
+const PLATFORM = 'web';   // 与 Constants.ets 的 DsDevice.PLATFORM 一致
 
 async function probe(url, opts) {
   try {
@@ -18,7 +20,12 @@ async function probe(url, opts) {
 }
 
 const base = 'https://chat.deepseek.com';
-const H = { 'Content-Type': 'application/json', 'Accept': '*/*', 'User-Agent': UA };
+const H = {
+  'Content-Type': 'application/json',
+  'Accept': '*/*',
+  'User-Agent': UA,
+  'x-ds-platform': PLATFORM,
+};
 
 // 1) 无 token 拉会话列表
 await probe(base + '/api/v0/chat_session/fetch_page?lte_cursor.pinned=false&count=5', {

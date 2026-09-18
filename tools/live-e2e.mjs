@@ -25,7 +25,12 @@ import { loadDeepSeekHash } from './ets-loader.mjs';
 const HDC = 'D:/DevEco Studio/sdk/default/openharmony/toolchains/hdc';
 const PREF = '/data/app/el2/100/base/com.dswatch.round/haps/entry/preferences/dswatch_store';
 const ORIGIN = 'https://chat.deepseek.com';
-const UA = 'Mozilla/5.0 (Linux; HarmonyOS; HUAWEI WATCH) AppleWebKit/537.36 (KHTML, like Gecko) Mobile Safari/537.36';
+// ★ 必须与 entry/src/main/ets/common/Constants.ets 的 DsHeader.USER_AGENT 保持一致。
+//   旧版本这里是伪造的 "HarmonyOS; HUAWEI WATCH … Mobile Safari"，自称 Mozilla
+//   却没有 Chrome/Safari 版本号 —— 正是触发风控 RISK_DEVICE_DETECTED 的原因之一。
+//   如果这里和 App 不一致，本脚本「通过」就不能代表 App 会通过。
+const UA = 'Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
+const PLATFORM = 'web';
 
 const ok = (s) => `\x1b[32m✓\x1b[0m ${s}`;
 const bad = (s) => `\x1b[31m✗\x1b[0m ${s}`;
@@ -59,6 +64,7 @@ const H = {
   'Content-Type': 'application/json',
   'Accept': '*/*',
   'User-Agent': UA,
+  'x-ds-platform': PLATFORM,
   'Authorization': 'Bearer ' + TOKEN,
 };
 

@@ -187,7 +187,8 @@ entry/src/main/
 | `d.sh` | hdc 直通（路径写死，避开引号/路径转换坑） |
 | `w.sh` | 手表调试：`shot` / `tap` / `text` / `key` / `log` |
 | `pow-verify.mjs` | PoW 全链路离线验证（**执行真源码**，8 项） |
-| `sse-parser-test.mjs` | SSE patch 解析回归（9 项） |
+| `sse-parser-test.mjs` | SSE patch 解析回归（16 项） |
+| `fingerprint-check.mjs` | **设备指纹一致性自检**：PC 验证脚本的 UA / platform 必须与 App 完全一致（不一致则 PC 跑通不代表真机能跑通） |
 | `live-e2e.mjs` | PC 端全链路验证（鉴权 → PoW → SSE → 历史回读 → **多轮连续对话**） |
 | `desensitize.py` | 本文档的脱敏脚本 |
 
