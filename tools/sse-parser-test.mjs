@@ -2,7 +2,7 @@
  * 回归测试：把 ArkTS 版 SseClient 的 patch 解析逻辑（片段类型追踪 + SET/APPEND 语义）
  * 1:1 移植到 JS，喂入几种真实的 SSE 帧序列，断言正文分派结果正确。
  *
- * 覆盖 10 种形态：
+ * 覆盖 12 组用例：
  *   A. 首帧全量 + response/fragments/<idx>/content 增量（当前线上主形态）
  *   B. thinking/content + response/content 前缀形态（老版本）
  *   C. 只有 fragments 数组帧 + fragments/-1/content（无首帧）
@@ -12,7 +12,12 @@
  *   G. 首帧就带完整 content（SET 语义）→ 输出全文，且后续 APPEND 不重复
  *   H. fragments 数组 APPEND 帧自带首段 content → 与后续增量正确拼接
  *   I. 从首帧 response 对象提取 message_id（Bug 16 的修复依赖它）
+ *   I-2. ★ message_id 为「会话内自增小整数」，跨会话同为 2 时不得误去重（Bug 18）
  *   J. 零帧挂死判定条件（Bug 17 看门狗的判据）
+ *
+ * ⚠️ 数据形态纪律（Bug 18 的教训）：
+ *   本测试用**真实数据形态**（message_id 用整数 2），不要为了"好写好认"
+ *   改成唯一字符串 —— 唯一值永不碰撞，会把"跨轮误去重"这类 Bug 藏成假绿。
  *
  * 运行：node tools/sse-parser-test.mjs
  */
