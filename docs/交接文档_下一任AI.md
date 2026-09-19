@@ -24,7 +24,7 @@
 | **★ 本轮修复（2026-09-19）** | **Bug 18**：`SseClient` 的 `message_id` 去重状态被写成 **static 且从不重置**，而服务端 `message_id` 是**会话内自增的小整数**（首个助手回复通常是 `2`）→ 第二个会话/第二轮的 `message_id=2` 被误判为「重复」而**吞掉回调** → `ChatService.rememberTurn()` 拿不到 id → 下一轮 `stop_stream` 发不出去 → **僵尸流清不掉，Bug 16 会复发**。已改为**实例字段 + 每轮 `start()` 重置**（详见 Bug 18） |
 | 本轮离线验证 | `node tools/pow-verify.mjs`（**8/8**）、`node tools/sse-parser-test.mjs`（**19/19**，本轮新增「用例 I-2：跨轮不得误去重」并做了**注入测试**，确认能变红）、`node tools/fingerprint-check.mjs`（**全绿**） |
 | ★ 本轮隐蔽陷阱 | **验证脚本用了「字符串型 message_id」把 Bug 藏住了**：真实服务端发的是小整数（`2`），而测试用例写的是 `"srv-abc-123"` 这类唯一字符串 —— **永不碰撞，所以测试永远是绿的**。这正是本工程反复踩的「用复制品验证产品」的坑。已把测试用例改成贴近真实的整数形态。 |
-| **真机状态** | ⚠️ **手表当前离线**：`192.168.47.104:45165` 已失效（`hdc tconn` 失败，`list targets` = `[Empty]`）。**需在手表上重新打开「通过 WLAN 调试」并读新地址**（IP 会变，DHCP）。<br>★ 判据纪律：**手表不响应 ICMP**，`ping` 不通≠离线，但**反过来 `ping` 返回「无法访问目标主机」= 该 IP 根本不存在**，此时不要再扫端口，直接去手表上读新地址。 |
+| **真机状态** | ⚠️ **手表当前离线**：`<DEVICE_IP>:45165` 已失效（`hdc tconn` 失败，`list targets` = `[Empty]`）。**需在手表上重新打开「通过 WLAN 调试」并读新地址**（IP 会变，DHCP）。<br>★ 判据纪律：**手表不响应 ICMP**，`ping` 不通≠离线，但**反过来 `ping` 返回「无法访问目标主机」= 该 IP 根本不存在**，此时不要再扫端口，直接去手表上读新地址。 |
 | 当前状态 | App 处于**未登录**（早前测试误触「退出登录」抹掉了 token），**需用户在手表上登录一次**才能继续端到端验证 |
 | 最大坑 | PoW 是 DeepSeek 强制的反爬工作量证明，**不能删**，只能优化；难度 144000，ArkTS 算力天花板约 1000~2000 哈希/秒 → 必须走原生 |
 | 本轮新增未完成项 | **微信扫码登录**：客户端代码已全部写完并编译通过，但 `QrLoginService.RELAY_BASE` 仍是**空占位符**（中继服务端未部署）→ 功能默认呈现为「尚未开放」，**这是设计好的降级，不是 bug**。详见 `docs/微信扫码登录_设计与可行性.md` §8.2 |
@@ -61,7 +61,7 @@
 | 12 | ★ 登录成功后按返回又见登录页 | 像没登上，反复登录 | `LoginPage` 用 `replaceUrl` 会把栈变成 `[Index, Index]`，返回退回到旧实例（`loggedIn` 仍是 false） | **已修（本轮）**：`router.clear()` + `replaceUrl`，保证栈里只有一个入口页 |
 | 13 | ★ token 失效时提示「网络失败」并让人无限重试 | 永远好不了 | 鉴权失败时 **HTTP 状态码也是 200**（实测 `code:40002/40003`），旧代码把非 0 码一律当成「获取失败」；另外被网关拦回来的 **HTML** 会 `JSON.parse` 抛异常被误报成网络不通 | **已修（本轮）**：`Http.parse()` 拆出 `-1`(网络) / `-2`(非 JSON)；`listSessions` 识别 `40002/40003` 并回 `needRelogin`，UI 给「重新登录」入口 |
 | 14 | ★ 冷启动偶发把用户踹回登录页 | 明明登录过却要重登 | `Store.init()` 失败后 `pref` 永久为 null，之后所有 `get` 返回默认值 → `restore()` 拿到空 token，且**没有任何重试机会** | **已修（本轮）**：保留 `ctx`，任何一次读写都尝试补初始化；新增 `isReady()`，存储读不出来时给「重试」而非引导去打密码 |
-| 15 | ★ **换网络就报风控，但手表浏览器能正常登录** | 用代理/VPN 出口时稳定报「当前网络环境有风险」（`RISK_DEVICE_DETECTED`, biz_code=11）；同一网络下**手表自带浏览器访问 chat.deepseek.com 完全正常且登录态长期保持** | **不是网络被封，是这个请求不像正常客户端**。两个原因叠加：<br>① **登录体缺字段** —— web 客户端会同时送 `device_name` / `device_model` / `token` / `platform` 做设备可信度评分，本项目早期**只发了 `device_id`**；<br>② **UA 不像任何真实浏览器** —— 旧 UA 自称 Mozilla/Safari 却没有版本号，与"脚本客户端"强相关。<br>浏览器没事是因为它有**长期稳定的设备指纹 + Cookie 会话**，是"可信设备"；App 每次全新安装生成**新的随机 device_id** 又无 Cookie → 风控眼里就是"陌生设备从可疑出口登录" | **已修（本轮）**：<br>① 登录体补齐 `device_name`/`device_model`/`token`/`platform`（`DsDevice` 常量类）；<br>② UA 换成结构完整的移动端 Chrome UA；<br>③ `device_id` 改为**全链路可见**（新增 `x-ds-device-id` + `x-ds-platform` 请求头，启动时 `AuthService.warmUp()` 预热同步缓存 `DeviceIdCache`）；<br>④ 风控文案改成**可操作**的指引（"先在同一网络下用浏览器登录一次"），并写明**不要**把 `device_id` 改成每次随机 |
+| 15 | ★ **换网络就报风控，但手表浏览器能正常登录** | 用代理/VPN 出口时稳定报「当前网络环境有风险」（`RISK_DEVICE_DETECTED`, biz_code=11）；同一网络下**手表自带浏览器访问 <API_HOST> 完全正常且登录态长期保持** | **不是网络被封，是这个请求不像正常客户端**。两个原因叠加：<br>① **登录体缺字段** —— web 客户端会同时送 `device_name` / `device_model` / `token` / `platform` 做设备可信度评分，本项目早期**只发了 `device_id`**；<br>② **UA 不像任何真实浏览器** —— 旧 UA 自称 Mozilla/Safari 却没有版本号，与"脚本客户端"强相关。<br>浏览器没事是因为它有**长期稳定的设备指纹 + Cookie 会话**，是"可信设备"；App 每次全新安装生成**新的随机 device_id** 又无 Cookie → 风控眼里就是"陌生设备从可疑出口登录" | **已修（本轮）**：<br>① 登录体补齐 `device_name`/`device_model`/`token`/`platform`（`DsDevice` 常量类）；<br>② UA 换成结构完整的移动端 Chrome UA；<br>③ `device_id` 改为**全链路可见**（新增 `x-<prefix>-device-id` + `x-ds-platform` 请求头，启动时 `AuthService.warmUp()` 预热同步缓存 `DeviceIdCache`）；<br>④ 风控文案改成**可操作**的指引（"先在同一网络下用浏览器登录一次"），并写明**不要**把 `device_id` 改成每次随机 |
 | 16 | ★★★ **「对话超过两次之后就达上限，无法继续对话」** | 聊 2~3 轮后消息发不出去：界面停在「准备中…」，**连接建立了但一个字节都不回**，没有报错、没有超时，永久挂死 | **`preempt:false` 的排队语义**。服务端发现该 session 上还有未结束的流（哪怕上一轮"本地已放弃、服务端还在跑"的**僵尸流**），就把新请求**挂在队列里**，既不发数据也不报错。<br>为什么偏偏"两次之后"：第 2 轮若用户中途退出页面/掉网/息屏，服务端那条流不会立刻结束 → 第 3 轮开始就撞上排队，**之后永远好不了**。<br>**放大因素**：`ChatService.stop()` 被调用时 `messageId` 传的是空串，服务端直接忽略 → "本地以为停了、服务端还在跑"，僵尸流源源不断 | **已修（本轮）**：<br>① `ChatService.send()` 里 **`preempt` 改为 `true`**（抢占语义，也是官方 web 客户端的行为）；<br>② `SseClient` 新增 `onMessageId` 回调，从**首帧 response 对象**里捞服务端真实 `message_id`（兼容 `message_id`/`messageId`/`id`）；<br>③ `ChatService` 记录 `lastSessionId`/`lastMessageId`，**下一轮发送前主动 `stop_stream`** 清僵尸流（双保险）；<br>④ `stop()` 收到空 `messageId` 时**自动回退**到记录的 id，不再静默失败；<br>⑤ 干净结束时 `clearTurn()`，避免无谓请求 |
 | 17 | ★ **挂死时无任何反馈，界面永久转圈** | 界面卡在「准备中…」，发送按钮再也点不动，用户完全无法判断发生了什么 | SSE 层原本只在 `dataReceive`/`dataEnd`/异常时回调，**连接建立但零数据**这种情况三个回调都不触发 | **已修（本轮）**：<br>① `SseClient` 新增**静默看门狗**（每 5s 检查）：45s 内**零帧** → 判定被挂起，主动 abort 并报 `stalled`；已收过数据只是安静（长思考）→ 只告警不打断；<br>② `ChatPage` 新增**发送硬上限看门狗**（3 分钟），兜住"连回调都没回来"的极端情况；<br>③ 新错误码 `stalled` / `srv_40303` 有专门文案且**给出下一步怎么做** |
 | 18 | ★★ **Bug 16 的修法本身有缺陷 → 僵尸流仍会清不掉**（本轮 2026-09-19 发现并修复，代码审查发现，真机未复现） | 表现应与 Bug 16 相同：聊若干轮后发不出去 | `SseClient.pickMessageId()` 的去重状态 `lastMessageId` 被声明为 **`static` 且 `start()` 里从不重置**；而服务端的 `message_id` **不是全局唯一 id，是「会话内自增的小整数」**（首帧实测 `"message_id":2`）。<br>于是跨会话/跨轮比较 `2 === 2` 成立 → 回调被静默吞掉 → `ChatService.rememberTurn()` 拿不到本轮 id → 下一轮发送前的 `stop_stream` **没有 id 可用**（`stop()` 见 `mid` 为空就直接 return）→ 僵尸流继续跑 → 再次撞上 `preempt` 排队。<br>**影响面**：只要用户开过第 2 个会话、或换过会话再回到老会话，清僵尸流这道保险就**从此失效**。 | **已修（本轮）**：<br>① 去重状态改为**实例字段** `reportedMessageId`，并在 `start()` 里重置（去重的本意只是「同一轮内别重复回调」，绝不能跨轮生效）；<br>② `pickMessageId` 由 static 改为实例方法，两处调用点同步改；<br>③ `tools/sse-parser-test.mjs` 新增**用例 I-2**（跨会话同为 `message_id=2` 必须都上报），并把旧用例里**字符串型 id**（`"srv-abc-123"`，永不碰撞、把 Bug 藏住了）保留为兼容性用例、另加整数用例；<br>④ **做了注入测试**：把去重改回 static 后用例确实变红（17 通过 / 2 失败），还原后 19/19 全绿 |
@@ -133,8 +133,8 @@
 > （可用 `./tools/d.sh shell "power-shell setmode 602"` 强制常亮）。
 >
 > ★ **不要用 `ping` 判断手表是否在线（2026-09-19 实测修正）**：
-> 手表**不响应 ICMP** —— `ping 192.168.47.104` 会报「无法访问目标主机」，
-> 但同期 `./tools/d.sh tconn 192.168.47.104:45165` **秒连 OK**。
+> 手表**不响应 ICMP** —— `ping <DEVICE_IP>` 会报「无法访问目标主机」，
+> 但同期 `./tools/d.sh tconn <DEVICE_IP>:45165` **秒连 OK**。
 > **唯一可信的在线判据是 `hdc tconn` / `hdc list targets`**。
 > （此前的"ping 不通就别扫"结论方向对、判据错：该扫不该扫应以 tconn 为准。）
 
@@ -337,7 +337,7 @@ Mozilla/5.0 (Linux; HarmonyOS; HUAWEI WATCH) AppleWebKit/537.36 (KHTML, like Gec
 |---|---|
 | 登录体补齐 `device_name`/`device_model`/`token`/`platform` | `Constants.ets` 的 `DsDevice` + `AuthService.login()` |
 | UA 换成结构完整的移动端 Chrome UA | `Constants.ets` 的 `DsHeader.USER_AGENT` |
-| 新增 `x-ds-device-id` + `x-ds-platform` 请求头，**所有请求**都带 | `Http.buildHeaders()` |
+| 新增 `x-<prefix>-device-id` + `x-ds-platform` 请求头，**所有请求**都带 | `Http.buildHeaders()` |
 | `device_id` 全链路可见：新增同步缓存 `DeviceIdCache`，启动时 `AuthService.warmUp()` 预热 | `Http.ets` + `AuthService.ets` + `EntryAbility.onCreate()` |
 | 风控文案改为**可操作指引**（"先用手机/电脑浏览器在同一网络下登录一次"） | `AuthService.login()` |
 
@@ -347,12 +347,12 @@ Mozilla/5.0 (Linux; HarmonyOS; HUAWEI WATCH) AppleWebKit/537.36 (KHTML, like Gec
 
 ### 如果以后还遇到
 
-1. **先用浏览器在同一个网络下登录一次 `chat.deepseek.com`** ——
+1. **先用浏览器在同一个网络下登录一次 `<API_HOST>`** ——
    服务端会把这个出口标记为可信，之后手表端再登录通常就过了（最快的手段）。
 2. 确认手表端 `device_id` 是稳定的（同一个值反复用），
    可在真机上查：`./tools/d.sh shell "cat /data/app/el2/100/base/com.dswatch.round/haps/entry/preferences/dswatch_store"`
    里的 `<string key="deviceId">`。
-3. 确认请求头里有 `x-ds-device-id`（`probe-auth.mjs` 可以扩展来打印请求头）。
+3. 确认请求头里有 `x-<prefix>-device-id`（`probe-auth.mjs` 可以扩展来打印请求头）。
 
 ---
 
@@ -493,16 +493,16 @@ node tools/live-e2e.mjs
 
 | 项 | 值 |
 |---|---|
-| 电脑 IPv4（最新） | `192.168.47.105/24`，网关 `192.168.47.1` |
-| 手表截图报的地址 | `192.168.47.107:45165` |
-| `ping 192.168.47.107` | **无法访问目标主机**（该 IP 当前不存在） |
-| `ping 192.168.47.103` | 有响应，但 **45165 端口关闭**（不是手表在此） |
+| 电脑 IPv4（最新） | `<DEVICE_IP>/24`，网关 `<DEVICE_IP>` |
+| 手表截图报的地址 | `<DEVICE_IP>:45165` |
+| `ping <DEVICE_IP>` | **无法访问目标主机**（该 IP 当前不存在） |
+| `ping <DEVICE_IP>` | 有响应，但 **45165 端口关闭**（不是手表在此） |
 | ARP 表可见主机 | 仅 `.1`(路由) / `.100` / `.102` / `.103` |
-| 全段扫描 `192.168.47.1-254:45165` | **无任何主机开放** |
+| 全段扫描 `<DEVICE_IP>-254:45165` | **无任何主机开放** |
 | `hdc list targets` | `[Empty]` |
 
 > **结论：电脑与手表现在同网段了，但手表根本不在这个 Wi-Fi 上（或调试开关是关的）。**
-> `192.168.47.107` 只是**手表曾经连过的那个网段里的地址**，是 DHCP 的历史值；
+> `<DEVICE_IP>` 只是**手表曾经连过的那个网段里的地址**，是 DHCP 的历史值；
 > 手表当前要么连的是别的 Wi-Fi/热点，要么"通过 WLAN 调试"已关闭。
 
 **下一步最小动作（按顺序）**：
@@ -534,7 +534,7 @@ node tools/live-e2e.mjs
    ★ **再加一条 Bug 18 专属用例**：发完一轮后**切到另一个会话再发** ——
    Bug 18 的表现正是「第 2 个会话的首条回复拿不到 message_id」，只有跨会话才暴露。
    同时 `./tools/w.sh log 'SseClient'` 看有没有 `STALLED`。
-5. 若风控仍复现：先用浏览器在同一网络登录一次 deepseek.com，再回手表重试。
+5. 若风控仍复现：先用浏览器在同一网络登录一次 <PROVIDER_DOMAIN>，再回手表重试。
 6. 回填本文档的"真机状态"一行。
 7. **微信扫码登录入口**（本轮新增）：进登录页 → 点顶部「微信扫码」→ 应看到
    **「微信扫码登录尚未开放 / 该功能需服务端支持 / 当前请使用密码登录」+ 「去密码登录」按钮**。
