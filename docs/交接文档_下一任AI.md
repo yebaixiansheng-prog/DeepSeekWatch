@@ -22,7 +22,7 @@
 | 本轮性能改造 | **PoW 改写成 C++ NAPI 原生模块**，真机 **44,318ms → 232ms（快 190 倍）**；再加后台预热，发送时几乎瞬时 |
 | **09-18 关键修复** | ① **登录风控**：补齐登录体设备字段 + 换掉异常 UA + device_id 全链路稳定（详见 Bug 15）<br>② ★★ **「聊两轮之后再也发不出去」**：`preempt:false` 被服务端排队挂死（详见 Bug 16），**这是用户反馈最痛的问题**<br>③ **静默看门狗**：连接建立但零数据时 45s 内自动判定并提示，不再无限转圈（详见 Bug 17） |
 | **★ 本轮修复（2026-09-19）** | **Bug 18**：`SseClient` 的 `message_id` 去重状态被写成 **static 且从不重置**，而服务端 `message_id` 是**会话内自增的小整数**（首个助手回复通常是 `2`）→ 第二个会话/第二轮的 `message_id=2` 被误判为「重复」而**吞掉回调** → `ChatService.rememberTurn()` 拿不到 id → 下一轮 `stop_stream` 发不出去 → **僵尸流清不掉，Bug 16 会复发**。已改为**实例字段 + 每轮 `start()` 重置**（详见 Bug 18） |
-| 本轮离线验证 | `node tools/pow-verify.mjs`（**8/8**）、`node tools/sse-parser-test.mjs`（**19/19**，本轮新增「用例 I-2：跨轮不得误去重」并做了**注入测试**，确认能变红）、`node tools/fingerprint-check.mjs`（**全绿**） |
+| 本轮离线验证 | `node tools/pow-verify.mjs`（**8/8**）、`node tools/sse-parser-test.mjs`（**19/19**）、`node tools/fingerprint-check.mjs`（**全绿**）、`node tools/qr-login-test.mjs`（**64/64**，微信扫码状态机，含**注入测试**） |
 | ★ 本轮隐蔽陷阱 | **验证脚本用了「字符串型 message_id」把 Bug 藏住了**：真实服务端发的是小整数（`2`），而测试用例写的是 `"srv-abc-123"` 这类唯一字符串 —— **永不碰撞，所以测试永远是绿的**。这正是本工程反复踩的「用复制品验证产品」的坑。已把测试用例改成贴近真实的整数形态。 |
 | **真机状态** | ⚠️ **手表当前离线**：`<DEVICE_IP>:45165` 已失效（`hdc tconn` 失败，`list targets` = `[Empty]`）。**需在手表上重新打开「通过 WLAN 调试」并读新地址**（IP 会变，DHCP）。<br>★ 判据纪律：**手表不响应 ICMP**，`ping` 不通≠离线，但**反过来 `ping` 返回「无法访问目标主机」= 该 IP 根本不存在**，此时不要再扫端口，直接去手表上读新地址。 |
 | 当前状态 | App 处于**未登录**（早前测试误触「退出登录」抹掉了 token），**需用户在手表上登录一次**才能继续端到端验证 |
@@ -692,6 +692,7 @@ hdc -t <手表IP>:45165 install entry/build/default/outputs/default/entry-defaul
 |---|---|---|
 | `node tools/pow-verify.mjs` | PoW 全链路：把 `DeepSeekHash.ets` **源码原样**转 JS 执行，与独立 BigInt 参考实现比对，覆盖 `permute`/`hashString`/`selfTest`/`searchRange` 快速路径 | **8/8 通过** |
 | `node tools/sse-parser-test.mjs` | SSE 解析回归 | **19/19 通过**（`用例 I-2` 专测 Bug 18；已做注入测试确认能变红） |
+| `node tools/qr-login-test.mjs` | **微信扫码（设备码）状态机回归**：10 组用例，含「未配置必须提前降级且不发请求」「本地过期判定」「各终止路径清定时器（带 pending 对照组）」「离页竞态」 | **64/64 通过**（已逐条注入测试；**有一条 `scheduleNext` 的 stopped 守卫做不到变红，已在注释里如实标注未覆盖**） |
 | `node tools/fingerprint-check.mjs` | **设备指纹一致性护栏**：以 `Constants.ets` 为唯一基准，自动比对 `live-e2e.mjs`/`probe-auth.mjs` 的 UA、PLATFORM、`x-ds-platform` 带头；含 UA 结构健全性检查与全仓库残留扫描 | **全绿** |
 | `node tools/live-e2e.mjs` | **PC 端全链路**：自动从手表读 token（也可 `DS_TOKEN=` 指定），验证 鉴权 → PoW → SSE 对话 → 历史回读 → **多轮连续对话** | 需手表已登录 |
 | `node tools/probe-auth.mjs` | 探测服务端鉴权失败的响应形态（用来确认「HTTP 200 但 code=40002/40003」） | 参考用 |
@@ -765,9 +766,10 @@ PoW 之所以能快 190 倍，靠的是 `entry/src/main/cpp/` 下的原生实现
 
 - [ ] 读 `docs/API_SPEC.md` 和本文第 2、3、5.4、9 节（**第 3 节有本轮踩过的真实事故**）。
 - [ ] 确认 `DeepSeekWatch-signed.hap` 是 **1,622,969 字节 / md5 `ad01d8b3acd4a3ea129b979812a01eba`**。
-- [ ] 跑三个离线回归，都要全绿：
+- [ ] 跑四个离线回归，都要全绿：
       `node tools/pow-verify.mjs`（PoW，8 项）、`node tools/sse-parser-test.mjs`（SSE，19 项）、
-      `node tools/fingerprint-check.mjs`（设备指纹一致性）。
+      `node tools/fingerprint-check.mjs`（设备指纹一致性）、
+      `node tools/qr-login-test.mjs`（微信扫码状态机，64 项）。
 - [ ] **第一优先：让用户在手表上登录一次。** 上一轮测试误触「退出登录」把 token 抹了，
       现在 App 停在登录页（预期行为，不是 bug）。密码只有用户有，无法代劳。
 - [ ] 登录后跑 `node tools/live-e2e.mjs`（自动读设备 token），确认 PC 侧全链路：
@@ -793,8 +795,12 @@ PoW 之所以能快 190 倍，靠的是 `entry/src/main/cpp/` 下的原生实现
 | `d.sh` | hdc 直通（路径写死，避免引号/路径踩坑） |
 | `w.sh` | 手表调试助手：`shot` / `tap` / `text` / `key` / `log` |
 | `pow-verify.mjs` | PoW 全链路离线验证（执行**真源码**）8/8 |
-| `sse-parser-test.mjs` | SSE patch 解析回归 9/9 |
+| `sse-parser-test.mjs` | SSE patch 解析回归 19/19 |
+| `qr-login-test.mjs` | 微信扫码（设备码）状态机回归 64/64 |
 | `live-e2e.mjs` | PC 端全链路验证（自动从设备读 token） |
 | `ets-loader.mjs` | 把 `.ets` 源码转成可执行 JS（给上面两个脚本复用） |
+| `fingerprint-check.mjs` | 设备指纹一致性护栏（改 UA/平台标识后必跑） |
+| `desensitize.py` | 开源前把 docs 里的真实域名/内网 IP 换成占位符 |
+| `sync_doc.py` | 把交接文档同步到用户目录那份（处理非 UTF-8 目录名；**会把占位符反向还原成真实值**） |
 | `probe-auth.mjs` | 探测服务端鉴权失败响应形态 |
 | `sync_doc.py` | 把交接文档同步到用户目录那份（处理非 UTF-8 目录名） |
