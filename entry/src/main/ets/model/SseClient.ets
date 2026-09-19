@@ -70,6 +70,19 @@ export class SseClient {
   private fragFull: boolean[] = [];
   /** 最近一次出现的片段类型（索引不可用时的兜底） */
   private lastFragType: string = '';
+  /**
+   * 本实例已经上报过的 message_id（用于抑制同一轮内的重复回调）
+   *
+   * ★ 必须是**实例字段**，且每轮 `start()` 都要清空 ——
+   *   早期它被写成 `static` 且从不重置，而服务端的 `message_id` 是
+   *   **每个会话内自增的小整数**（首个助手回复通常是 `2`）。
+   *   于是「上一个会话/上一轮上报过 2」会让本轮 `message_id=2` 被去重逻辑
+   *   直接吞掉 → `onMessageId` 不触发 → `ChatService.rememberTurn()` 拿不到 id
+   *   → 下一轮发不出 `stop_stream` → **僵尸流清不掉**，
+   *   正好复现 Bug 16「聊几轮后彻底发不出去」。
+   *   去重的本意只是「同一轮内别重复回调」，绝不能跨轮、跨会话生效。
+   */
+  private reportedMessageId: string = '';
 
   /** 诊断用：本次流收到的帧数 / 累计正文字数 / 见过的路径 */
   private frameCount: number = 0;
@@ -111,6 +124,7 @@ export class SseClient {
     this.fragTypes = [];
     this.fragFull = [];
     this.lastFragType = '';
+    this.reportedMessageId = '';
     this.frameCount = 0;
     this.textLen = 0;
     this.seenPaths = '';
@@ -373,7 +387,7 @@ export class SseClient {
     // ★ 顺带捞「服务端为这一轮分配的 message_id」。
     //   首帧的 response 对象里带 message_id，这是后续
     //   `stop_stream` 唯一能用的凭据（下一轮发送前用它清僵尸流）。
-    SseClient.pickMessageId(vo, cb);
+    this.pickMessageId(vo, cb);
 
     // 形态一：v 自己就是带 fragments 的对象
     const direct: Object | undefined = vo['fragments'];
@@ -389,7 +403,7 @@ export class SseClient {
         continue;
       }
       const io: Record<string, Object> = inner as Record<string, Object>;
-      SseClient.pickMessageId(io, cb);
+      this.pickMessageId(io, cb);
       const fs: Object | undefined = io['fragments'];
       if (fs !== undefined && fs !== null && Array.isArray(fs)) {
         this.absorbFragmentArray(fs as Object[], op, cb);
@@ -402,11 +416,10 @@ export class SseClient {
    * 从 response 对象里取 message_id 并回调
    *
    * 兼容 `message_id` / `messageId` / `id` 三种命名（不同版本服务端用过不同键），
-   * 且只在拿到非空值、且与上次上报不同时才回调（避免每帧都触发）。
+   * 且只在拿到非空值、且与**本实例本轮**已上报过的值不同时才回调
+   * （避免每帧都触发；跨轮/跨会话的比较由 `reportedMessageId` 每轮重置来保证不误吞）。
    */
-  private static lastMessageId: string = '';
-
-  private static pickMessageId(o: Record<string, Object>, cb: SseCallbacks): void {
+  private pickMessageId(o: Record<string, Object>, cb: SseCallbacks): void {
     if (cb.onMessageId === undefined) {
       return;
     }
@@ -417,10 +430,10 @@ export class SseClient {
     if (mid.length === 0) {
       mid = SseClient.pickStr(o, 'id');
     }
-    if (mid.length === 0 || mid === SseClient.lastMessageId) {
+    if (mid.length === 0 || mid === this.reportedMessageId) {
       return;
     }
-    SseClient.lastMessageId = mid;
+    this.reportedMessageId = mid;
     cb.onMessageId(mid);
   }
 

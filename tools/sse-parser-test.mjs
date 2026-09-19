@@ -30,8 +30,6 @@ const FragmentType = {
 
 // ---------------- 被测逻辑（从 SseClient.ets 移植） ----------------
 class MiniSse {
-  /** 与 SseClient.lastMessageId 对应的静态去重状态 */
-  static lastMessageId = '';
   /** 本次测试收集到的 message_id 上报序列 */
   static messageIds = [];
 
@@ -41,8 +39,29 @@ class MiniSse {
     this.fragTypes = [];
     this.fragFull = [];
     this.lastFragType = '';
+    /**
+     * ★ 与 SseClient.reportedMessageId 对应的**实例级**去重状态。
+     *
+     * 必须是实例字段且每轮 start() 清空 —— 服务端 message_id 是
+     * **会话内自增的小整数**（首个助手回复通常是 2），
+     * 若像早期实现那样做成 static 且不重置，
+     * 第二个会话的 message_id=2 会被误判为「重复」而吞掉回调，
+     * 导致僵尸流清不掉（Bug 16 复发）。
+     */
+    this.reportedMessageId = '';
     this.events = [];
     this.errors = [];
+    this.seenPaths = '';
+  }
+
+  /** 对应 SseClient.start() 的状态重置 */
+  reset() {
+    this.lastPath = '';
+    this.lastOp = '';
+    this.fragTypes = [];
+    this.fragFull = [];
+    this.lastFragType = '';
+    this.reportedMessageId = '';
     this.seenPaths = '';
   }
 
@@ -137,7 +156,7 @@ class MiniSse {
   absorbStructValue(v, op) {
     if (typeof v !== 'object' || v === null) return;
     // ★ 新增：从 response 对象里捞 message_id（Bug 16 的修复依赖它）
-    MiniSse.pickMessageId(v);
+    this.pickMessageId(v);
     const direct = v['fragments'];
     if (direct !== undefined && direct !== null && Array.isArray(direct)) {
       this.absorbFragmentArray(direct, op);
@@ -146,7 +165,7 @@ class MiniSse {
     for (const k of ['response', 'thinking', 'search']) {
       const inner = v[k];
       if (inner === undefined || inner === null || typeof inner !== 'object') continue;
-      MiniSse.pickMessageId(inner);
+      this.pickMessageId(inner);
       const fs = inner['fragments'];
       if (fs !== undefined && fs !== null && Array.isArray(fs)) {
         this.absorbFragmentArray(fs, op);
@@ -162,14 +181,14 @@ class MiniSse {
    * `stop_stream` 唯一能用的凭据（下一轮发送前用它清僵尸流）。
    * 兼容 message_id / messageId / id 三种命名。
    */
-  static pickMessageId(o) {
+  pickMessageId(o) {
     if (!o || typeof o !== 'object') return;
     let mid = MiniSse.pickStr(o, 'message_id');
     if (mid.length === 0) mid = MiniSse.pickStr(o, 'messageId');
     if (mid.length === 0) mid = MiniSse.pickStr(o, 'id');
     if (mid.length === 0) return;
-    if (mid === MiniSse.lastMessageId) return;
-    MiniSse.lastMessageId = mid;
+    if (mid === this.reportedMessageId) return;   // ← 实例级去重，不跨轮
+    this.reportedMessageId = mid;
     MiniSse.messageIds.push(mid);
   }
 
@@ -395,7 +414,6 @@ console.log('用例 H：fragments 数组 APPEND 帧自带首段 content，需与
 // ---------------- 用例 I：message_id 提取（Bug 16 依赖） ----------------
 console.log('用例 I：从首帧 response 对象提取 message_id');
 {
-  MiniSse.lastMessageId = '';
   MiniSse.messageIds = [];
   const s = new MiniSse();
   s.feed(
@@ -406,7 +424,6 @@ console.log('用例 I：从首帧 response 对象提取 message_id');
 }
 {
   // 同一 id 反复出现只上报一次（避免每帧都触发回调）
-  MiniSse.lastMessageId = '';
   MiniSse.messageIds = [];
   const s = new MiniSse();
   s.feed(
@@ -417,7 +434,6 @@ console.log('用例 I：从首帧 response 对象提取 message_id');
 }
 {
   // 兼容 camelCase 命名
-  MiniSse.lastMessageId = '';
   MiniSse.messageIds = [];
   const s = new MiniSse();
   s.feed('data: {"p":"","o":"SET","v":{"response":{"messageId":"camel-1","fragments":[]}}}\n\n');
@@ -425,11 +441,35 @@ console.log('用例 I：从首帧 response 对象提取 message_id');
 }
 {
   // 裸 id 命名（部分版本）
-  MiniSse.lastMessageId = '';
   MiniSse.messageIds = [];
   const s = new MiniSse();
   s.feed('data: {"p":"","o":"SET","v":{"response":{"id":"bare-1","fragments":[]}}}\n\n');
   check('兼容裸 id 命名', MiniSse.messageIds, ['bare-1']);
+}
+
+// ---------------- 用例 I-2：★ 跨轮 / 跨会话不得吞掉 message_id ----------------
+console.log('用例 I-2：★ 服务端 message_id 是会话内自增小整数，跨轮不得误去重');
+{
+  // 真实形态：message_id 是数字（首个助手回复通常就是 2）。
+  // 若去重状态被做成 static 且不重置，第二个会话的 2 会被误判为"重复"，
+  // onMessageId 不触发 → ChatService 记不到 id → 僵尸流清不掉 → Bug 16 复发。
+  MiniSse.messageIds = [];
+
+  // 会话 A：message_id = 2
+  const a = new MiniSse();
+  a.feed('data: {"p":"","o":"SET","v":{"response":{"message_id":2,"fragments":[]}}}\n\n');
+  check('会话A 上报 message_id=2', MiniSse.messageIds, ['2']);
+
+  // 会话 B（全新实例，全新一轮）：同样拿到 message_id = 2
+  const b = new MiniSse();
+  b.reset();                       // 对应 SseClient.start() 的重置
+  b.feed('data: {"p":"","o":"SET","v":{"response":{"message_id":2,"fragments":[]}}}\n\n');
+  check('★ 会话B 的 message_id=2 必须也上报（不得跨轮去重）',
+    MiniSse.messageIds, ['2', '2']);
+
+  // 同一轮内重复出现仍然只报一次（去重的本意）
+  b.feed('data: {"p":"","o":"SET","v":{"response":{"message_id":2,"fragments":[]}}}\n\n');
+  check('同一轮内重复仍只上报一次', MiniSse.messageIds, ['2', '2']);
 }
 
 // ---------------- 用例 J：零帧挂死判定（Bug 17 的判定条件） ----------------

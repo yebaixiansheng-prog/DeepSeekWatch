@@ -1,7 +1,8 @@
 # 交接文档 — 给「下一个 AI」（DeepSeek 手表版 HarmonyOS 工程）
 
 > 阅读对象：接手本工程、继续做手表端功能开发与真机验证的 AI。
-> 最后更新：**2026-09-18**（本轮完成：登录风控修复、**多轮对话挂死修复**、静默看门狗、AI 执行手册）
+> 最后更新：**2026-09-19**（本轮完成：**Bug 18 —— `message_id` 跨轮去重导致僵尸流清不掉**，SSE 回归扩到 19 项并做了注入测试）
+> 上一轮（2026-09-18）完成：登录风控修复、**多轮对话挂死修复**、静默看门狗、AI 执行手册
 > 配套阅读：`docs/API_SPEC.md`（接口逆向规格，必读）、`docs/交接文件清单.md`（打包给第三方的文件清单）、`docs/鸿蒙开发实战教程.md`（第 9 章是六个真实 Bug 的完整复盘）、**`docs/鸿蒙手表应用开发_AI执行手册.md`（给另一个 AI 的独立开发手册，用于并行开发其他手表应用）**。
 >
 > 本文定位：让下一个 AI 在 **10 分钟内** 接手，知道「已经做到哪、卡在哪、下一步改哪、怎么验证」。
@@ -15,15 +16,15 @@
 | 工程路径 | `D:\HarmonyBuild\DeepSeekWatch` |
 | 包名 | `com.dswatch.round`（穿戴设备 wearable） |
 | 形态 | HarmonyOS 圆形手表 App，ArkTS/ArkUI，DevEco Studio 构建 |
-| 当前可装包 | `entry/build/default/outputs/default/entry-default-signed.hap`（**1,599,295 字节 / md5 `0998e1cde55f3362d799e5e1918e4263`，2026-09-18 20:44 构建**） |
-| 已修 Bug | **17 个**（登录/输入法/发送无反应/PoW算法/SSE格式/THREAD_BLOCK_6S/渲染不刷新/布局溢出 + 本轮新增 3 个，详见第 2 节） |
+| 当前可装包 | `entry/build/default/outputs/default/entry-default-signed.hap`（**1,599,296 字节 / md5 `54b76d257263c292df6898f160479971`，2026-09-19 14:13 构建**） |
+| 已修 Bug | **18 个**（登录/输入法/发送无反应/PoW算法/SSE格式/THREAD_BLOCK_6S/渲染不刷新/布局溢出 + 09-18 的 3 个 + 本轮新增 1 个，详见第 2 节） |
 | 本轮新增功能 | 右上角 `≡` → **历史对话列表页**；删除「快速/专项模式」切换；`⋯` 设置浮层只留深度思考/联网搜索 |
 | 本轮性能改造 | **PoW 改写成 C++ NAPI 原生模块**，真机 **44,318ms → 232ms（快 190 倍）**；再加后台预热，发送时几乎瞬时 |
-| **本轮关键修复（2026-09-18）** | ① **登录风控**：补齐登录体设备字段 + 换掉异常 UA + device_id 全链路稳定（详见 Bug 15）<br>② ★★ **「聊两轮之后再也发不出去」**：`preempt:false` 被服务端排队挂死（详见 Bug 16），**这是用户反馈最痛的问题**<br>③ **静默看门狗**：连接建立但零数据时 45s 内自动判定并提示，不再无限转圈（详见 Bug 17） |
-| 本轮离线验证 | `node tools/pow-verify.mjs`（**8/8**）、`node tools/sse-parser-test.mjs`（**16/16**，本轮从 9 项扩到 16 项）、`node tools/fingerprint-check.mjs`（**全绿**）；`tools/live-e2e.mjs` 新增**多轮对话用例**（【5】，专测 Bug 16） |
-| ★ 本轮隐蔽陷阱 | **PC 验证脚本的 UA 与 App 不一致**：为修风控 App 换了 UA，但 `live-e2e.mjs`/`probe-auth.mjs` 还留着旧的伪造 UA → 脚本在验证一个**已不存在的客户端指纹**，所以「协议层已验证」这个结论**是假的**。已同步修复并新增 `fingerprint-check.mjs` 护栏 |
-| **本轮加固（2026-09-18 晚）** | `Store` 全操作加 try/catch + 新增 `getChecked()`（区分「真没值」与「没读到」）；`AuthService.restore()` 用 `getChecked` 并暴露 `isRestoreFailed()`；`Index` 同时判 `!Store.isReady()` 与 `isRestoreFailed()`；`PowSolver` 新增 `PowFail` 区分「取不到题」与「算超时」，`waitPrewarm` 60s→20s 且改为「先看结果再等」 |
-| **真机状态** | ⚠️ **未复验**。网段问题已解决（电脑现为 `192.168.47.105/24`，与手表截图同段），但**手表当前不在这个网络上**：`192.168.47.107` ping 不通（"无法访问目标主机"），全段 254 个地址无人开放 45165。需在手表上**重新打开「通过 WLAN 调试」**并读新地址 |
+| **09-18 关键修复** | ① **登录风控**：补齐登录体设备字段 + 换掉异常 UA + device_id 全链路稳定（详见 Bug 15）<br>② ★★ **「聊两轮之后再也发不出去」**：`preempt:false` 被服务端排队挂死（详见 Bug 16），**这是用户反馈最痛的问题**<br>③ **静默看门狗**：连接建立但零数据时 45s 内自动判定并提示，不再无限转圈（详见 Bug 17） |
+| **★ 本轮修复（2026-09-19）** | **Bug 18**：`SseClient` 的 `message_id` 去重状态被写成 **static 且从不重置**，而服务端 `message_id` 是**会话内自增的小整数**（首个助手回复通常是 `2`）→ 第二个会话/第二轮的 `message_id=2` 被误判为「重复」而**吞掉回调** → `ChatService.rememberTurn()` 拿不到 id → 下一轮 `stop_stream` 发不出去 → **僵尸流清不掉，Bug 16 会复发**。已改为**实例字段 + 每轮 `start()` 重置**（详见 Bug 18） |
+| 本轮离线验证 | `node tools/pow-verify.mjs`（**8/8**）、`node tools/sse-parser-test.mjs`（**19/19**，本轮新增「用例 I-2：跨轮不得误去重」并做了**注入测试**，确认能变红）、`node tools/fingerprint-check.mjs`（**全绿**） |
+| ★ 本轮隐蔽陷阱 | **验证脚本用了「字符串型 message_id」把 Bug 藏住了**：真实服务端发的是小整数（`2`），而测试用例写的是 `"srv-abc-123"` 这类唯一字符串 —— **永不碰撞，所以测试永远是绿的**。这正是本工程反复踩的「用复制品验证产品」的坑。已把测试用例改成贴近真实的整数形态。 |
+| **真机状态** | ⚠️ **本轮仍未复验**。电脑现为 `192.168.47.102/24`（与早前同段），但手表**不在该网络**：`192.168.47.107` ping 不通，`hdc list targets` 为 `[Empty]` |
 | 当前状态 | App 处于**未登录**（早前测试误触「退出登录」抹掉了 token），**需用户在手表上登录一次**才能继续端到端验证 |
 | 最大坑 | PoW 是 DeepSeek 强制的反爬工作量证明，**不能删**，只能优化；难度 144000，ArkTS 算力天花板约 1000~2000 哈希/秒 → 必须走原生 |
 
@@ -62,6 +63,7 @@
 | 15 | ★ **换网络就报风控，但手表浏览器能正常登录** | 用代理/VPN 出口时稳定报「当前网络环境有风险」（`RISK_DEVICE_DETECTED`, biz_code=11）；同一网络下**手表自带浏览器访问 chat.deepseek.com 完全正常且登录态长期保持** | **不是网络被封，是这个请求不像正常客户端**。两个原因叠加：<br>① **登录体缺字段** —— web 客户端会同时送 `device_name` / `device_model` / `token` / `platform` 做设备可信度评分，本项目早期**只发了 `device_id`**；<br>② **UA 不像任何真实浏览器** —— 旧 UA 自称 Mozilla/Safari 却没有版本号，与"脚本客户端"强相关。<br>浏览器没事是因为它有**长期稳定的设备指纹 + Cookie 会话**，是"可信设备"；App 每次全新安装生成**新的随机 device_id** 又无 Cookie → 风控眼里就是"陌生设备从可疑出口登录" | **已修（本轮）**：<br>① 登录体补齐 `device_name`/`device_model`/`token`/`platform`（`DsDevice` 常量类）；<br>② UA 换成结构完整的移动端 Chrome UA；<br>③ `device_id` 改为**全链路可见**（新增 `x-ds-device-id` + `x-ds-platform` 请求头，启动时 `AuthService.warmUp()` 预热同步缓存 `DeviceIdCache`）；<br>④ 风控文案改成**可操作**的指引（"先在同一网络下用浏览器登录一次"），并写明**不要**把 `device_id` 改成每次随机 |
 | 16 | ★★★ **「对话超过两次之后就达上限，无法继续对话」** | 聊 2~3 轮后消息发不出去：界面停在「准备中…」，**连接建立了但一个字节都不回**，没有报错、没有超时，永久挂死 | **`preempt:false` 的排队语义**。服务端发现该 session 上还有未结束的流（哪怕上一轮"本地已放弃、服务端还在跑"的**僵尸流**），就把新请求**挂在队列里**，既不发数据也不报错。<br>为什么偏偏"两次之后"：第 2 轮若用户中途退出页面/掉网/息屏，服务端那条流不会立刻结束 → 第 3 轮开始就撞上排队，**之后永远好不了**。<br>**放大因素**：`ChatService.stop()` 被调用时 `messageId` 传的是空串，服务端直接忽略 → "本地以为停了、服务端还在跑"，僵尸流源源不断 | **已修（本轮）**：<br>① `ChatService.send()` 里 **`preempt` 改为 `true`**（抢占语义，也是官方 web 客户端的行为）；<br>② `SseClient` 新增 `onMessageId` 回调，从**首帧 response 对象**里捞服务端真实 `message_id`（兼容 `message_id`/`messageId`/`id`）；<br>③ `ChatService` 记录 `lastSessionId`/`lastMessageId`，**下一轮发送前主动 `stop_stream`** 清僵尸流（双保险）；<br>④ `stop()` 收到空 `messageId` 时**自动回退**到记录的 id，不再静默失败；<br>⑤ 干净结束时 `clearTurn()`，避免无谓请求 |
 | 17 | ★ **挂死时无任何反馈，界面永久转圈** | 界面卡在「准备中…」，发送按钮再也点不动，用户完全无法判断发生了什么 | SSE 层原本只在 `dataReceive`/`dataEnd`/异常时回调，**连接建立但零数据**这种情况三个回调都不触发 | **已修（本轮）**：<br>① `SseClient` 新增**静默看门狗**（每 5s 检查）：45s 内**零帧** → 判定被挂起，主动 abort 并报 `stalled`；已收过数据只是安静（长思考）→ 只告警不打断；<br>② `ChatPage` 新增**发送硬上限看门狗**（3 分钟），兜住"连回调都没回来"的极端情况；<br>③ 新错误码 `stalled` / `srv_40303` 有专门文案且**给出下一步怎么做** |
+| 18 | ★★ **Bug 16 的修法本身有缺陷 → 僵尸流仍会清不掉**（本轮 2026-09-19 发现并修复，代码审查发现，真机未复现） | 表现应与 Bug 16 相同：聊若干轮后发不出去 | `SseClient.pickMessageId()` 的去重状态 `lastMessageId` 被声明为 **`static` 且 `start()` 里从不重置**；而服务端的 `message_id` **不是全局唯一 id，是「会话内自增的小整数」**（首帧实测 `"message_id":2`）。<br>于是跨会话/跨轮比较 `2 === 2` 成立 → 回调被静默吞掉 → `ChatService.rememberTurn()` 拿不到本轮 id → 下一轮发送前的 `stop_stream` **没有 id 可用**（`stop()` 见 `mid` 为空就直接 return）→ 僵尸流继续跑 → 再次撞上 `preempt` 排队。<br>**影响面**：只要用户开过第 2 个会话、或换过会话再回到老会话，清僵尸流这道保险就**从此失效**。 | **已修（本轮）**：<br>① 去重状态改为**实例字段** `reportedMessageId`，并在 `start()` 里重置（去重的本意只是「同一轮内别重复回调」，绝不能跨轮生效）；<br>② `pickMessageId` 由 static 改为实例方法，两处调用点同步改；<br>③ `tools/sse-parser-test.mjs` 新增**用例 I-2**（跨会话同为 `message_id=2` 必须都上报），并把旧用例里**字符串型 id**（`"srv-abc-123"`，永不碰撞、把 Bug 藏住了）保留为兼容性用例、另加整数用例；<br>④ **做了注入测试**：把去重改回 static 后用例确实变红（17 通过 / 2 失败），还原后 19/19 全绿 |
 
 代码层发送链路现状（已验证）：
 - `DeepSeekHash.ets`：`DeepSeekHashV1` 移植正确，`selfTest()` 通过标准向量。**禁止改动**（`Int32Array` 版实测更慢，属历史包袱，可回退但不影响功能——原生路径优先）。
@@ -151,12 +153,12 @@
 | `entry/src/main/ets/pages/HistoryPage.ets` | **新增** | 历史对话列表（圆屏 List + 表冠滚动 + 置顶标记 + 相对时间） |
 | `entry/src/main/ets/common/Nav.ets` | **新增** | 页面间一次性传参槽位（历史页 → 对话页） |
 | `entry/src/main/ets/model/ChatService.ets` | `listSessions()` **新增**、`abortStream()` **新增**、`history()`(已有) | 会话列表走 **GET** `fetch_page` |
-| `entry/src/main/ets/model/SseClient.ets` | `handlePatch()` **重写** | 维护 `fragTypes[]`，按索引判类型 |
+| `entry/src/main/ets/model/SseClient.ets` | `handlePatch()` **重写**；`reportedMessageId` 为**实例字段**（每轮 `start()` 重置，Bug 18） | 维护 `fragTypes[]`，按索引判类型 |
 | `entry/src/main/ets/model/PowTask.ets` | `WORKERS=3`、`RANGE_PER_WORKER=12000` | 并行求解 |
 | `entry/src/main/ets/model/PowSolver.ets` | `prewarm()` / `doPrewarm()` / `waitPrewarm()` **新增** | 预热 + 等待中透传进度 |
 | `entry/src/main/ets/common/Constants.ets` | `SESSION_FETCH='/api/v0/chat_session/fetch_page'`、`ModelType.QUICK='default'` | expert/vision 账号不可用，别改 |
 | `entry/src/main/resources/base/profile/main_pages.json` | 4 页：Index/LoginPage/ChatPage/**HistoryPage** | 加页面必须在此注册 |
-| `tools/sse-parser-test.mjs` | **新增** | SSE patch 解析回归测试（**16 个用例**，`node tools/sse-parser-test.mjs`） |
+| `tools/sse-parser-test.mjs` | **新增** | SSE patch 解析回归测试（**19 个用例**，`node tools/sse-parser-test.mjs`）；含用例 I-2 专测 Bug 18 |
 | `tools/pow-verify.mjs` | **新增** | **PoW 全链路验证**：直接执行 `DeepSeekHash.ets` 源码 + 独立 BigInt 参考实现交叉验证（8 项全绿，`node tools/pow-verify.mjs`） |
 | `tools/fingerprint-check.mjs` | **新增** | **设备指纹一致性护栏**：验证脚本的 UA/platform 必须与 App 一致（`node tools/fingerprint-check.mjs`） |
 
@@ -471,6 +473,7 @@ node tools/live-e2e.mjs
    - `frames>0 textLen=0` → 帧收到了但都判成非正文，把 `paths=` 打出来核对；
    - **`frames>0 textLen>0` 但界面空白** → **Bug 9 又回来了**（`ForEach` key 没带 `rev`）；
    - `frames=0` 且 45s 后 `STALLED` → **先确认 `preempt` 是不是又被改回 `false` 了**；
+   - `frames=0` 且 `STALLED`，且 `preempt` 确实是 `true` → **查 Bug 18**：`SseClient` 的 `message_id` 去重是不是又变成 `static` 了（`grep -n reportedMessageId entry/src/main/ets/model/SseClient.ets` 应看到实例字段 + `start()` 里重置）；
    - `NativeHash: native selfTest=FAIL` → 原生模块没生效，会自动回退 ArkTS（慢但能发出去）。
 
 ### 本轮的真机复验状态（⚠️ 未完成）
@@ -625,7 +628,7 @@ hdc -t <手表IP>:45165 install entry/build/default/outputs/default/entry-defaul
 | 脚本 | 作用 | 现状 |
 |---|---|---|
 | `node tools/pow-verify.mjs` | PoW 全链路：把 `DeepSeekHash.ets` **源码原样**转 JS 执行，与独立 BigInt 参考实现比对，覆盖 `permute`/`hashString`/`selfTest`/`searchRange` 快速路径 | **8/8 通过** |
-| `node tools/sse-parser-test.mjs` | SSE 解析回归 | **16/16 通过** |
+| `node tools/sse-parser-test.mjs` | SSE 解析回归 | **19/19 通过**（`用例 I-2` 专测 Bug 18；已做注入测试确认能变红） |
 | `node tools/fingerprint-check.mjs` | **设备指纹一致性护栏**：以 `Constants.ets` 为唯一基准，自动比对 `live-e2e.mjs`/`probe-auth.mjs` 的 UA、PLATFORM、`x-ds-platform` 带头；含 UA 结构健全性检查与全仓库残留扫描 | **全绿** |
 | `node tools/live-e2e.mjs` | **PC 端全链路**：自动从手表读 token（也可 `DS_TOKEN=` 指定），验证 鉴权 → PoW → SSE 对话 → 历史回读 → **多轮连续对话** | 需手表已登录 |
 | `node tools/probe-auth.mjs` | 探测服务端鉴权失败的响应形态（用来确认「HTTP 200 但 code=40002/40003」） | 参考用 |
@@ -661,6 +664,8 @@ hdc -t <手表IP>:45165 install entry/build/default/outputs/default/entry-defaul
 - 【禁止】**把 `completion` 请求体的 `preempt` 改回 `false`**——这是「聊两轮之后再也发不出去」的根因（Bug 16）。服务端会把你排队挂死，且**不报错、不超时、无日志**，排查成本极高。
 - 【禁止】**把 `device_id` 改成每次登录重新随机**——风控会直接把出口 IP 拉黑（Bug 15）。`ensureDeviceId()` 的持久化语义必须保留，`DeviceIdCache` 的预热也不能删。
 - 【禁止】**给 `SseClient.start()` 传一个 callback 却漏掉 `onMessageId`**——漏了就拿不到服务端 `message_id`，下一轮清不了僵尸流（Bug 16 的放大因素）。若新增 SseClient 调用方，务必实现该回调。
+- 【禁止】**把 `SseClient` 的 `message_id` 去重状态改回 `static`、或删掉 `start()` 里的重置**（Bug 18）——服务端 `message_id` 是**会话内自增的小整数**，static 去重会让「第二个会话的首条回复」被误判成重复而**吞掉 `onMessageId`**，僵尸流随即清不掉，Bug 16 直接复活。去重只能**在同一轮内**生效。
+- 【注意】**测试数据要贴近真实形态**（Bug 18 的教训）：旧用例用 `"srv-abc-123"` 这种唯一字符串测 `message_id`，**永不碰撞**，所以测试一直是绿的、把 Bug 藏住了。凡是拿服务端字段做键的逻辑，测试都必须用**真实的数据形态**（此处是整数 `2`）。
 - 【禁止】让任何网络操作**没有失败出口**——必须保证"超时/挂起"最终会走到一次明确的 UI 反馈。`SseClient` 的静默看门狗与 `ChatPage` 的发送硬上限看门狗**都不许删**（Bug 17）。
 - 【注意】SSE 无 `event:` 名的帧才是正文增量，别再犯 Bug 5 的错；正文路径里的**索引不带类型**，别再犯 Bug 7 的错。
 - 【注意】`taskpool` 的 `@Concurrent` 函数**不能调同文件内函数、不能用 AppStorage**，只能 import 进来的线程安全模块。
@@ -692,9 +697,10 @@ PoW 之所以能快 190 倍，靠的是 `entry/src/main/cpp/` 下的原生实现
 ## 10. 下一个 AI 的快速上手 checklist
 
 - [ ] 读 `docs/API_SPEC.md` 和本文第 2、3、5.4、9 节（**第 3 节有本轮踩过的真实事故**）。
-- [ ] 确认 `DeepSeekWatch-signed.hap` 是 **1,599,295 字节 / md5 `0998e1cde55f3362d799e5e1918e4263`**。
+- [ ] 确认 `DeepSeekWatch-signed.hap` 是 **1,599,296 字节 / md5 `54b76d257263c292df6898f160479971`**。
 - [ ] 跑三个离线回归，都要全绿：
-      `node tools/pow-verify.mjs`（PoW，8 项）、`node tools/sse-parser-test.mjs`（SSE，9 项）。
+      `node tools/pow-verify.mjs`（PoW，8 项）、`node tools/sse-parser-test.mjs`（SSE，19 项）、
+      `node tools/fingerprint-check.mjs`（设备指纹一致性）。
 - [ ] **第一优先：让用户在手表上登录一次。** 上一轮测试误触「退出登录」把 token 抹了，
       现在 App 停在登录页（预期行为，不是 bug）。密码只有用户有，无法代劳。
 - [ ] 登录后跑 `node tools/live-e2e.mjs`（自动读设备 token），确认 PC 侧全链路：
