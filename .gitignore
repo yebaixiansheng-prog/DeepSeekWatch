@@ -64,3 +64,4 @@ tools/_wasmtest/
 
 # 会话/工具临时目录（含截图等中间产物），不入库
 .workbuddy-ai/
+.git-msg.tmp

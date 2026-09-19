@@ -1,5 +1,8 @@
 import router from '@ohos.router';
 import promptAction from '@ohos.promptAction';
+// ★ 用于主动收起输入法：真机实测「点输入框外」不会触发 onBlur，
+//   全屏输入法会吃掉触摸事件，必须走系统 API。
+import inputMethod from '@ohos.inputMethod';
 import { Typo, FontScale, Round } from '../common/RoundScreen';
 import { AuthService, LoginResult, DsUser } from '../model/AuthService';
 import { QrLoginService, QrStartResult, QrPollCallbacks } from '../model/QrLoginService';
@@ -85,6 +88,57 @@ struct LoginPage {
     Typo.scale = this.fontScale;
   }
 
+  /**
+   * 收起输入法（程序化出口）
+   *
+   * ★★ 真机结论（2026-09-19，已用布局树 + 像素双重验证）：
+   *   本机（华为圆形手表）的输入法窗口是 **bounds=[0,0][466,466] 的全屏窗口**，
+   *   它会**完全盖住 App 自己的窗口**：
+   *     - `uitest dumpLayout` 在键盘在屏时，App 的窗口返回**空布局树**
+   *       （`-b com.dswatch.round` dump 出来的 children 是空的）；
+   *     - 键盘在屏时截图里也**找不到 App 上任何控件的像素**。
+   *   推论（很重要，别再白费力气）：
+   *     · **App 里任何「点这里收键盘」的按钮都不可能被点到** ——
+   *       它虽然会被送去渲染，但整个 App 窗口都在输入法底下，
+   *       用户既看不见也点不着（我是真加过、真机验证过、又删掉的）。
+   *     · 因此**不要让 UI 逻辑依赖这个函数被用户触发**。
+   *
+   *   用户收起键盘的**唯一实际途径是系统 Back**：真机连续三轮验证，
+   *   Back 会先收键盘，且**页面完好留在登录页**（不会把页面弹走）。
+   *   ← 这修正了 Bug 11 时期「Back 会把页面弹走」的旧记录：
+   *     当时的弹走是因为那一次本来就是从入口页新进登录页，
+   *     Back 正好回退了那一步导航，并不代表 Back 会误退页面。
+   *
+   *   本函数保留用于**程序化**收起（如登录成功后自动收键盘、
+   *   或将来做「点遮罩收起」等系统级方案），不依赖用户点 App 内按钮。
+   *
+   * 三个动作都要做：
+   *   ① `hideTextInput()` 让系统真正收起键盘；
+   *   ② `stopEditing()` 解除输入框的编辑态；
+   *   ③ 手动复位 `keyboardOn`（不能只依赖 onBlur）。
+   *
+   * 幂等：键盘没弹出时调用无副作用。
+   */
+  private dismissKeyboard(): void {
+    if (!this.keyboardOn) {
+      return;
+    }
+    // ① 系统级收起（这是真正有效的那个调用）
+    try {
+      inputMethod.getController().hideTextInput();
+    } catch (e) {
+      // 某些形态/版本可能不支持，静默降级到 ②③
+    }
+    // ② 解除输入框编辑态
+    try {
+      this.accountInput.stopEditing();
+      this.passwordInput.stopEditing();
+    } catch (e) {
+    }
+    // ③ 手动复位状态位
+    this.keyboardOn = false;
+  }
+
   build() {
     Stack({ alignContent: Alignment.Top }) {
       Column() {
@@ -111,7 +165,11 @@ struct LoginPage {
         }
 
         // ---------- 登录方式切换（密码 / 微信扫码）----------
-        // 输入法拉起时隐藏，避免和输入法抢竖向空间
+        // ★ 输入态下**不再画任何东西**。
+        //   曾经在这里放过一个「收起键盘」按钮，真机验证发现：
+        //   输入法是全屏窗口，把 App 整个盖住，按钮看不见也点不到。
+        //   收起键盘只能靠系统 Back（真机已验证可行且不会弹走页面）。
+        //   保留这个 if 是为了「输入态隐藏标签页、把竖向空间让给表单」。
         if (!this.keyboardOn) {
           this.ModeTabs()
         }
@@ -125,8 +183,17 @@ struct LoginPage {
 
         // 未拉起输入法时才显示辅助提示（避免和输入法抢占竖向空间）
         // 圆屏底部会被裁切 → 提示整体上提，避免贴着下沿
+        //
+        // ★ 这里必须告诉用户「怎么收键盘」：真机确认输入法是全屏窗口，
+        //   App 盖在下面，我们**给不出任何可点的收起按钮**；
+        //   唯一途径是系统 Back。不写这句，用户会以为键盘卡住了。
         if (!this.keyboardOn) {
           Text('表冠调节字号 · ' + this.fontLabel())
+            .fontSize(Typo.caption - 2)
+            .fontColor('#5A5F6B')
+            .margin({ top: 2 })
+        } else {
+          Text('按侧键返回可收起键盘')
             .fontSize(Typo.caption - 2)
             .fontColor('#5A5F6B')
             .margin({ top: 2 })
@@ -574,9 +641,8 @@ struct LoginPage {
       return;
     }
     // 收起输入法，避免登录过程中的界面被遮挡
-    this.keyboardOn = false;
-    this.accountInput.stopEditing();
-    this.passwordInput.stopEditing();
+    // ★ 走统一出口，别再手写一遍（否则两条路径迟早在行为上分叉）
+    this.dismissKeyboard();
 
     this.loading = true;
     this.errMsg = '';
