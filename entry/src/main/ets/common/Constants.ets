@@ -30,6 +30,25 @@ export class DsApi {
 
   // ---- PoW ----
   static readonly POW_CHALLENGE: string = '/api/v0/chat/create_pow_challenge';
+
+  // ---- 微信扫码登录（2026-09-19 对线上 bundle main.7d19d7e901.js 逆向实测）----
+  /**
+   * 用 OAuth 授权码换 DeepSeek userToken
+   *
+   * ⚠️ 这是**普通 JSON POST**（不是 SSE），body 为 `{nonce, provider}`。
+   *    响应：`{code, data:{biz_code, biz_data:{token}}}`
+   *    —— token 在 `biz_data.token`，**与密码登录在 `biz_data.user.token` 不同**。
+   *
+   * ⚠️ `nonce` 由服务端在 OAuth 回调跳转时带上，**客户端无法自行构造**。
+   *    因此 ArkTS 端只有在「拿到 nonce」时才能调它（见 docs/微信扫码登录_设计与可行性.md 第 3 节）。
+   */
+  static readonly OAUTH_GET_TOKEN: string = '/oauth/get_token';
+
+  /** 微信 JSSDK 签名（取 appid/timestamp/noncestr/signature），query 传 url */
+  static readonly WECHAT_JSSDK_SIGNATURE: string = '/api/v0/client/wechat_js_sdk_signature';
+
+  /** OAuth 回调地址（微信扫码确认后由微信重定向到此，服务端再带 nonce 跳回客户端） */
+  static readonly OAUTH_WECHAT_CALLBACK: string = '/oauth/wechat/callback';
 }
 
 /**
@@ -62,6 +81,54 @@ export class LoginBizCode {
   static readonly OK: number = 0;
   static readonly BAD_CREDENTIAL: number = 2; // PASSWORD_OR_USER_NAME_IS_WRONG
   static readonly RISK_DEVICE: number = 11; // RISK_DEVICE_DETECTED
+  /** 注册地受限（bundle 内 REGISTER_FROM_MAINLAND=12） */
+  static readonly REGISTER_FROM_MAINLAND: number = 12;
+  /** 该渠道临时停用（bundle 内 TEMP_DISABLED_IN_THIS_CHANNEL=98） */
+  static readonly TEMP_DISABLED: number = 98;
+  /** 未预期错误（bundle 内 UNEXCEPTED_ERROR=99） */
+  static readonly UNEXPECTED: number = 99;
+}
+
+/**
+ * OAuth 提供方标识
+ *
+ * ⚠️ 必须**大写**——实测 `/oauth/get_token` 的 `provider` 取值即为此三串字面量
+ *    （bundle 内 `["GOOGLE","APPLE","WECHAT"]`）。
+ */
+export class OAuthProvider {
+  static readonly GOOGLE: string = 'GOOGLE';
+  static readonly APPLE: string = 'APPLE';
+  static readonly WECHAT: string = 'WECHAT';
+}
+
+/**
+ * `/oauth/get_token` 的失败码（2026-09-19 实测，bundle 内
+ * `OAUTH_WECHAT_CALLBACK_ERROR_MESSAGE_CODE`）
+ */
+export class OAuthBizCode {
+  static readonly OK: number = 0;
+  /** 授权码 / nonce 失效（已用过或超时）——需重新走一遍扫码 */
+  static readonly SWAP_CODE_INVALID: number = 2;
+  /** 账号被封禁 */
+  static readonly ACCOUNT_BANNED: number = 4;
+  /** 该渠道临时停用 */
+  static readonly TEMP_DISABLED: number = 98;
+  static readonly UNEXPECTED: number = 99;
+}
+
+/**
+ * 微信登录相关的「账号绑定」错误码（实测，供未来做绑定/补手机号时用）
+ *
+ * 注意其中的 `NEED_BIND_MOBILE` —— 微信**首次**登录 DeepSeek 时，
+ * 服务端可能要求补绑手机号。UI 必须为此留出分支，
+ * 否则用户会看到「什么都没发生」。
+ */
+export class WechatBindCode {
+  static readonly WECHAT_NOT_BOUND: number = 3;
+  /** 该手机号已关联过微信 */
+  static readonly MOBILE_ACCOUNT_ALREADY_HAS_WECHAT: number = 5;
+  /** 该微信已绑过手机号 */
+  static readonly WECHAT_ACCOUNT_ALREADY_BOUND_MOBILE: number = 6;
 }
 
 /**

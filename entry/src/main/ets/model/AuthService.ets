@@ -269,7 +269,36 @@ export class AuthService {
     return '';
   }
 
-  /** 恢复登录态 */
+  /**
+   * 恢复登录态 */
+  /**
+   * 用「外部已获得的 token」建立登录态（微信扫码登录用）
+   *
+   * ★ 设计要点（保证与密码登录**完全兼容**）：
+   *   两种登录方式产出的都是 DeepSeek 的同一个 `userToken`，
+   *   所以**落盘出口必须共用**，下游（Index / ChatPage / HistoryPage）
+   *   对登录来源毫无感知 —— 这正是「兼容」的实现方式。
+   *
+   * ⚠️ 不要为新登录方式另写一套 Store key 或新的 token 字段，
+   *    否则 `restore()`、`logout()`、以及所有 `AuthService.getToken()` 调用点
+   *    都要跟着分支，必然漏改。
+   *
+   * @param token 微信扫码链路拿到的 userToken
+   * @param user  用户信息（可能为 null，此时仅落 token，由后续 /users/current 补齐）
+   */
+  static async adoptToken(token: string, user: DsUser | null): Promise<boolean> {
+    if (token.length === 0) {
+      return false;
+    }
+    AuthService.token = token;
+    AuthService.user = user;
+    await Store.put(Keys.TOKEN, token);
+    if (user !== null) {
+      await Store.put(Keys.USER, JSON.stringify(user));
+    }
+    return true;
+  }
+
   /**
    * 恢复登录态
    *
