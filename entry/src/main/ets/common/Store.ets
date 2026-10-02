@@ -149,12 +149,23 @@ export class Store {
 
 /** 存储 key */
 export class Keys {
-  static readonly TOKEN: string = 'token';
-  static readonly USER: string = 'user_json';
-  static readonly DEVICE_ID: string = 'device_id';
+  /**
+   * ★ 2026-09-30 推倒重来后的键表。
+   *   与官方 API 架构对齐：不再有 token/user_json/device_id
+   *   （那些是网页版登录态，官方 API 用一串 API Key 就够）。
+   */
+  /** API 密钥（用户在设置页覆盖内置值时用） */
+  static readonly API_KEY: string = 'api_key';
+  /** 当前模型 ID */
+  static readonly MODEL: string = 'model';
+  /** 思考模式开关（'1' / '0'） */
+  static readonly THINKING: string = 'thinking';
+  /** 联网搜索开关（'1' / '0'） */
+  static readonly SEARCH: string = 'search';
+  /** 字号档位 */
   static readonly FONT_SCALE: string = 'font_scale';
-  static readonly LAST_MODE: string = 'last_mode';
-  static readonly AUTO_THINK: string = 'auto_think';
-  static readonly AUTO_SEARCH: string = 'auto_search';
+  /** 会话索引 JSON */
+  static readonly SESSION_INDEX: string = 'session_index';
+  /** 最近打开的会话 id */
   static readonly LAST_SESSION: string = 'last_session_id';
 }

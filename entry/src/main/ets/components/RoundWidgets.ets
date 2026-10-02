@@ -15,6 +15,19 @@ export struct RoundButton {
   @Prop enabledState: boolean = true;
   /** 宽度占屏比（0-1），由页面按安全圆传入 */
   @Prop widthRatio: number = 0.62;
+  /**
+   * 按钮高度（vp）。默认 48vp = 96px，满足最小触控规范。
+   *
+   * ★ 为什么做成可配（2026-09-19）：登录页纵向空间极紧，
+   *   需要在同一屏内塞下「2 个输入框 + 错误行 + 按钮」。
+   *   圆屏越靠下弦宽越窄，按钮**下沿**每低 1px，可用宽度就少一截。
+   *   把高度收一档（48 → 40vp）能直接换回 16px 的下沿余量。
+   *   其它页面不传这个参数，行为与之前完全一致（仍是 48）。
+   *
+   * ⚠️ 不建议低于 36vp（72px）：圆屏上最小可点区域约 96px 见方，
+   *    40vp（80px）已经是实用下限，再小会出现「点不准」。
+   */
+  @Prop heightVp: number = 48;
   onTap: () => void = () => {
   };
 
@@ -22,7 +35,7 @@ export struct RoundButton {
     Button(this.label)
       .type(ButtonType.Capsule)
       .width((this.widthRatio * 100).toFixed(0) + '%')
-      .height(48)
+      .height(this.heightVp)
       .fontSize(Typo.title)
       .fontWeight(FontWeight.Medium)
       .fontColor(this.primary ? '#FFFFFF' : '#C8CCD4')

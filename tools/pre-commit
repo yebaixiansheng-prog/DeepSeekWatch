@@ -1,0 +1,74 @@
+#!/bin/sh
+#
+# pre-commit 钩子：阻止 API 密钥进入版本库
+#
+# ★ 为什么必须有这一层（而不是靠"记得别提交"）：
+#   本仓库是**公开**的。GitHub 上扫 `sk-` 前缀的爬虫是**分钟级**的 ——
+#   密钥一旦推上去，几分钟内就会被抓走盗刷。
+#   靠人记住"别提交那个文件"是**不可靠**的：
+#   一次 `git add -A`、一次 `git commit -a`，就漏了。
+#   所以把判断交给机器。
+#
+# 检查两件事：
+#   1. 暂存区里是否有 `sk-` 开头的真实密钥（任意文本文件）；
+#   2. `LocalKey.ets` 的值是否非空。
+#
+# 如果确实需要提交（例如提交的是占位符），用 `git commit --no-verify` 绕过，
+# 但请先确认内容里没有真密钥。
+
+fail=0
+
+# ---- 1. 扫描所有暂存文件里的 sk- 形态密钥 ----
+#   ★★ 排除列表里**绝不能写真实密钥的字面量** —— 那等于把它放进公开仓库。
+#      （本文件第一版就犯了这个错：为了跳过"已知误报"把真密钥写进了
+#        `grep -vE` 里，结果钩子自己成了泄漏源。已修。）
+#      只排除**明显是占位符/测试用**的形态：
+#        · 全 0、全 x、your、example、xxx、省略号
+#        · 以及测试里故意用的无效密钥（形如 sk-后跟连续 0 或 dead 结尾）
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+for f in $staged; do
+  case "$f" in
+    *.png|*.jpg|*.jpeg|*.gif|*.ico|*.hap|*.so|*.a|*.p12|*.cer|*.p7b) continue ;;
+    .git/hooks/*) continue ;;
+  esac
+  [ -f "$f" ] || continue
+
+  # 匹配 sk- 后跟 20 位以上字母数字（真实密钥形态）
+  hits=$(grep -nEo 'sk-[A-Za-z0-9]{20,}' "$f" 2>/dev/null \
+         | grep -vE 'sk-(0{20,}|x{20,}|dead|test|fake|dummy)' \
+         | grep -viE 'sk-(your|example|xxx|placeholder)' \
+         | grep -vE 'sk-0{10,}[A-Za-z0-9]*dead' )
+  if [ -n "$hits" ]; then
+    echo "❌ 检测到疑似真实 API 密钥，已阻止提交："
+    echo "   文件: $f"
+    echo "$hits" | sed 's/^/     /'
+    fail=1
+  fi
+done
+
+# ---- 2. 若暂存了 LocalKey.ets（非 .example），其值必须为空 ----
+#   ⚠️ 匹配要精确到结尾：`LocalKey\.ets` 会连 `LocalKey.ets.example` 一起匹配到，
+#      导致提交模板时被误拦（这个 bug 真犯过）。
+if git diff --cached --name-only | grep -qE 'LocalKey\.ets$'; then
+  # 取暂存区版本的内容（不是工作区）
+  val=$(git show :entry/src/main/ets/common/LocalKey.ets 2>/dev/null \
+        | grep -E "VALUE" | head -1)
+  if ! echo "$val" | grep -qE "VALUE\s*:\s*string\s*=\s*''\s*;"; then
+    echo "❌ LocalKey.ets 的密钥非空，已阻止提交："
+    echo "    暂存内容: $val"
+    echo "    这个文件在版本库里必须保持空值。"
+    fail=1
+  fi
+fi
+
+if [ "$fail" -ne 0 ]; then
+  echo ""
+  echo "─────────────────────────────────────────────"
+  echo "本仓库是公开的，密钥一旦推送会被自动爬虫抓走盗刷。"
+  echo "请把密钥留在本地 LocalKey.ets 里（该文件已在 .gitignore 中声明为本地文件），"
+  echo "提交的版本必须是空值。"
+  echo "─────────────────────────────────────────────"
+  exit 1
+fi
+
+exit 0

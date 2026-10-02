@@ -1,384 +1,275 @@
+#!/usr/bin/env node
 /**
- * PC 端「全链路」真机协议验证器
+ * 真实 API 全链路测试（PC 端，不需真机）
  *
- * 为什么要有它：
- *   在手表上验证一次要经历「编译→安装→重启→点按→看日志」，一轮 3~5 分钟，
- *   而且手表上打日志、看日志都很笨重。协议层（PoW / 请求头 / SSE 帧）的问题
- *   完全可以在 PC 上用同一份算法、同一个账号，几秒钟验证一遍，
- *   把手表留给人机交互（布局、点击、渲染）的验证。
+ * ★ 设计取舍（重要）：
+ *   这里**不重写任何协议逻辑** —— 请求体构造、SSE 解析、工具参数累积、
+ *   消息序列校验、搜索页解析，全部用 `tools/ets-load.mjs` 加载的**真源码**。
+ *   只有「socket」这一层换成 Node 的 fetch（因为 @ohos.net.http 在 PC 上不存在）。
  *
- * token 从哪来：
- *   1) 环境变量 DS_TOKEN（优先）
- *   2) 否则**直接从手表读**：hdc shell cat 应用 Preferences 文件，
- *      从 XML 里取出 token。这样不需要任何人把密码交出来。
+ *   价值：协议层行为与手表上**逐字节一致**。
+ *   真机只需验证「UI 有没有把内容显示出来」，而不是「协议对不对」。
+ *   若这里也自己写一套解析，验证的就是副本不是产品（历史教训：
+ *   抄错 5 处高低位顺序，得出过完全错误的结论）。
+ *
+ * 覆盖：
+ *   1. 非流式对话
+ *   2. 流式对话（SSE 逐帧）
+ *   3. 思考模式（reasoning_content 是否下发）
+ *   4. ★ 联网搜索完整往返（模型要工具 → 真抓 Bing → 回灌 → 出答案）
+ *   5. 错误路径（错误密钥 → 鉴权失败分流）
  *
  * 用法：
- *   node tools/live-e2e.mjs                 # 读设备 token，跑全链路
- *   node tools/live-e2e.mjs "1+1=?"         # 自定义提问
- *   DS_TOKEN=xxx node tools/live-e2e.mjs    # 用指定 token
- *
- * ⚠️ 这个脚本会在终端打印服务端返回的正文，但**不会把 token 落盘**。
+ *   node tools/live-e2e.mjs                 # 用工程内置密钥
+ *   node tools/live-e2e.mjs --key sk-xxx    # 指定密钥
  */
-import { execFileSync } from 'child_process';
-import { loadDeepSeekHash } from './ets-loader.mjs';
 
-const HDC = 'D:/DevEco Studio/sdk/default/openharmony/toolchains/hdc';
-const PREF = '/data/app/el2/100/base/com.dswatch.round/haps/entry/preferences/dswatch_store';
-const ORIGIN = 'https://chat.deepseek.com';
-// ★ 必须与 entry/src/main/ets/common/Constants.ets 的 DsHeader.USER_AGENT 保持一致。
-//   旧版本这里是伪造的 "HarmonyOS; HUAWEI WATCH … Mobile Safari"，自称 Mozilla
-//   却没有 Chrome/Safari 版本号 —— 正是触发风控 RISK_DEVICE_DETECTED 的原因之一。
-//   如果这里和 App 不一致，本脚本「通过」就不能代表 App 会通过。
-const UA = 'Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
-const PLATFORM = 'web';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { loadEts } from './ets-load.mjs';
 
-const ok = (s) => `\x1b[32m✓\x1b[0m ${s}`;
-const bad = (s) => `\x1b[31m✗\x1b[0m ${s}`;
-const info = (s) => `  ${s}`;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(__dirname, '..');
 
-// ---------------------------------------------------------------- token
-function tokenFromDevice() {
-  let xml = '';
-  try {
-    xml = execFileSync(HDC, ['shell', `cat ${PREF}`], { encoding: 'utf8', timeout: 20000 });
-  } catch (e) {
+let pass = 0, fail = 0;
+const failures = [];
+function ok(name, cond, extra) {
+  if (cond) { pass++; console.log('  ✓ ' + name); }
+  else {
+    fail++;
+    failures.push(name + (extra ? '  → ' + extra : ''));
+    console.log('  ✗ ' + name + (extra ? '  → ' + extra : ''));
+  }
+}
+
+/**
+ * 从真源码取密钥，保证与 App 用同一个
+ *
+ * ★ 密钥现在放在 `LocalKey.ets`（在 .gitignore 里，绝不入库），
+ *   `Constants.ets` 只是引用它。所以要读 LocalKey。
+ */
+function apiKeyFromSource() {
+  const p = path.join(ROOT, 'entry/src/main/ets/common/LocalKey.ets');
+  if (!fs.existsSync(p)) {
     return '';
   }
-  const m = /<string key="token">([^<]+)<\/string>/.exec(xml);
+  const s = fs.readFileSync(p, 'utf8');
+  // 匹配 VALUE: string = 'sk-...'   （允许类型标注的写法）
+  const m = s.match(/VALUE\s*:\s*string\s*=\s*'([^']*)'/)
+    || s.match(/VALUE\s*=\s*'([^']*)'/);
   return m ? m[1] : '';
 }
+const argKeyIdx = process.argv.indexOf('--key');
+const API_KEY = argKeyIdx >= 0 ? process.argv[argKeyIdx + 1] : apiKeyFromSource();
+const BASE = 'https://api.deepseek.com/chat/completions';
 
-const TOKEN = process.env.DS_TOKEN || tokenFromDevice();
-const PROMPT = process.argv[2] || '1+1=?';
-
-if (!TOKEN) {
-  console.log(bad('拿不到 token。'));
-  console.log(info('手表上还没登录，或者应用沙箱路径变了。'));
-  console.log(info('先在手表上登录一次，或用 DS_TOKEN=xxx 直接指定。'));
-  process.exit(2);
+if (!API_KEY) {
+  console.error('未找到 API 密钥。');
+  console.error('  密钥应在 entry/src/main/ets/common/LocalKey.ets 里（该文件不入库）。');
+  console.error('  若文件不存在，先执行：');
+  console.error('    cp entry/src/main/ets/common/LocalKey.ets.example \\');
+  console.error('       entry/src/main/ets/common/LocalKey.ets');
+  console.error('  然后填入 sk- 密钥；或用 --key sk-xxx 直接指定。');
+  process.exit(1);
 }
-console.log(ok(`拿到 token（${TOKEN.length} 字符，不在日志里回显）`));
-console.log('');
+console.log('使用密钥: ' + API_KEY.substring(0, 7) + '…' + API_KEY.slice(-4) + '\n');
 
-const H = {
-  'Content-Type': 'application/json',
-  'Accept': '*/*',
-  'User-Agent': UA,
-  'x-ds-platform': PLATFORM,
-  'Authorization': 'Bearer ' + TOKEN,
-};
+// ---------------------------------------------------------------------------
+const PRELUDE = `
+function noop() {}
+const ErrCode = { OK:0, NETWORK:-1, AUTH:-2, NO_BALANCE:-3, RATE_LIMIT:-4, SERVER:-5, BAD_PAYLOAD:-6, ABORTED:-7, BIZ:-8 };
+const ErrMsg = { NETWORK:'网络不通，请检查手表 Wi-Fi', AUTH:'API 密钥无效，请在设置里重新填写',
+  NO_BALANCE:'账户余额不足，请先充值', RATE_LIMIT:'请求太频繁，请稍后再试',
+  SERVER:'DeepSeek 服务暂时不可用，请稍后重试', BAD_PAYLOAD:'服务端返回了无法识别的数据，请稍后重试',
+  ABORTED:'已停止', NO_KEY:'尚未配置 API 密钥' };
+const Role = { SYSTEM:'system', USER:'user', ASSISTANT:'assistant', TOOL:'tool' };
+const Thinking = { ON:'enabled', OFF:'disabled' };
+const SearchCfg = { TOOL_NAME:'web_search', ENDPOINT:'https://cn.bing.com/search', TIMEOUT_MS:12000, MAX_RESULTS:5, MAX_ROUNDS:2 };
+const DsHeader = { AUTH:'Authorization', CONTENT_TYPE:'Content-Type', ACCEPT:'Accept', BEARER:'Bearer ' };
+const DsApi = { ORIGIN:'https://api.deepseek.com', CHAT:'/chat/completions', BALANCE:'/user/balance' };
+const http = { createHttp: () => ({ request: async () => ({responseCode:200, result:''}), destroy(){} }) };
+const MAX_SEND_MSGS = 24, MAX_STORED_MSGS = 200, MAX_SESSIONS = 30;
+const Store = { async get(){ return ''; }, async put(){}, async remove(){} };
+const Keys = {};
+`;
 
-let failures = 0;
-function check(name, pass, extra = '') {
-  if (pass) {
-    console.log(ok(name + (extra ? '  ' + extra : '')));
-  } else {
-    console.log(bad(name + (extra ? '  ' + extra : '')));
-    failures++;
-  }
-}
+const api = await loadEts('model/ApiClient.ets', [
+  'export class SseDecoder', 'export class SseChunk', 'export class ToolCallAccum',
+  'export class ErrMapper', 'export class ApiClient', 'export function parseQuery',
+  'export class SearchTools'
+], PRELUDE);
 
-// ---------------------------------------------------------- 1. 鉴权自检
-console.log('【1】token 是否有效（fetch_page）');
-{
-  const r = await fetch(
-    ORIGIN + '/api/v0/chat_session/fetch_page?lte_cursor.pinned=false&count=5',
-    { method: 'GET', headers: H });
-  const t = await r.text();
-  const j = JSON.parse(t);
-  // ⚠️ 鉴权失败时 HTTP 状态码也是 200，只能看 code
-  check('HTTP 200 且业务码为 0', r.status === 200 && j.code === 0,
-    `code=${j.code} msg=${j.msg}`);
-  if (j.code === 0) {
-    const n = j.data?.biz_data?.chat_sessions?.length ?? 0;
-    console.log(info(`会话列表返回 ${n} 条`));
-  } else {
-    console.log(info('token 失效，后面的用例没有意义，先重新登录'));
-    process.exit(1);
-  }
-}
-console.log('');
+const search = await loadEts('model/SearchService.ets', [
+  'export function parseBing', 'export function cleanText', 'export function formatForModel',
+  'function extractBlocks', 'function firstTag', 'function firstParagraph',
+  'function firstHref', 'function stripTagBlock'
+], PRELUDE);
 
-// ------------------------------------------------------------- 2. PoW
-console.log('【2】PoW 挑战与求解（用工程真源码算法）');
-let pow = null;
-{
-  const r = await fetch(ORIGIN + '/api/v0/chat/create_pow_challenge', {
-    method: 'POST', headers: H,
-    body: JSON.stringify({ target_path: '/api/v0/chat/completion' }),
-  });
-  const j = await r.json();
-  check('取到挑战', j.code === 0 && !!j.data?.biz_data?.challenge?.challenge,
-    `code=${j.code}`);
-  if (j.code !== 0) { process.exit(1); }
+const store = await loadEts('model/ChatStore.ets', [
+  'export function trimForSend', 'export function validateApiSequence'
+], PRELUDE + '\nconst ChatStore = {};\n');
 
-  const c = j.data.biz_data.challenge;
-  console.log(info(`algorithm=${c.algorithm} difficulty=${c.difficulty}`));
+const { SseDecoder, SseChunk, ToolCallAccum, ErrMapper, ApiClient, parseQuery } = api;
+const { parseBing, formatForModel } = search;
+const { validateApiSequence } = store;
 
-  const { DeepSeekHash } = await loadDeepSeekHash();
-  const prefix = `${c.salt}_${c.expire_at}_`;
-  const t0 = Date.now();
-  const answer = DeepSeekHash.searchRange(prefix, c.challenge, 0, c.difficulty);
-  const ms = Date.now() - t0;
-  check('在难度范围内搜出 nonce', answer >= 0, `answer=${answer} 耗时=${ms}ms`);
-
-  // 交叉确认：把 nonce 代回去必须命中挑战
-  // 注意 hashString 返回的是 Uint8Array（32 字节），要用 toHex 才可比字符串
-  const h = DeepSeekHash.toHex(DeepSeekHash.hashString(prefix + answer));
-  check('代回验证哈希等于 challenge', h === c.challenge,
-    h === c.challenge ? '' : `得到 ${h.slice(0, 16)}… 期望 ${c.challenge.slice(0, 16)}…`);
-
-  pow = {
-    algorithm: c.algorithm, challenge: c.challenge, salt: c.salt,
-    answer, signature: c.signature, target_path: '/api/v0/chat/completion',
-  };
-}
-console.log('');
-
-// ------------------------------------------------- 3. 建会话 + SSE 对话
-console.log(`【3】发送消息并接收流式回复（"${PROMPT}"）`);
-let sessionId = '';
-let answerText = '';
-let frames = 0;
-let sawFinish = false;
-{
-  // 建会话
-  const cr = await fetch(ORIGIN + '/api/v0/chat_session/create', {
-    method: 'POST', headers: H, body: '{}',
-  });
-  const cj = await cr.json();
-  sessionId = cj.data?.biz_data?.chat_session?.id ?? '';
-  check('创建会话', sessionId.length > 0, `session=${sessionId.slice(0, 12)}…`);
-
-  const powB64 = Buffer.from(JSON.stringify(pow)).toString('base64');
-  const body = JSON.stringify({
-    chat_session_id: sessionId,
-    parent_message_id: null,
-    model_type: 'default',
-    prompt: PROMPT,
-    ref_file_ids: [],
-    thinking_enabled: false,
-    search_enabled: false,
-    // ★ 与 App 保持一致：抢占语义。false 会在「上一轮流未结束」时被服务端排队挂死。
-    preempt: true,
-  });
-
-  const t0 = Date.now();
-  const r = await fetch(ORIGIN + '/api/v0/chat/completion', {
+// ---------------------------------------------------------------------------
+async function callApi(req, msgs) {
+  const body = ApiClient.buildBody(req, msgs);
+  const r = await fetch(BASE, {
     method: 'POST',
     headers: {
-      ...H,
+      'Content-Type': 'application/json',
       'Accept': 'text/event-stream',
-      'X-DS-PoW-Response': powB64,
+      'Authorization': 'Bearer ' + req.apiKey
     },
-    body,
+    body
   });
-  check('SSE 连接建立', r.status === 200, `status=${r.status}`);
-
-  const reader = r.body.getReader();
-  const dec = new TextDecoder();
-  let buf = '';
-  // 正文增量集中在 response/fragments/<idx>/content
-  const frags = new Map();
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) { break; }
-    buf += dec.decode(value, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl).replace(/\r$/, '');
-      buf = buf.slice(nl + 1);
-      if (!line.startsWith('data:')) { continue; }
-      const payload = line.slice(5).trim();
-      if (!payload) { continue; }
-      frames++;
-      let obj;
-      try { obj = JSON.parse(payload); } catch { continue; }
-      if (obj.p === 'response/status' || obj.p === 'status') { continue; }
-
-      // JSON-Patch: {p, o, v}
-      if (obj.o === 'APPEND' && typeof obj.p === 'string') {
-        const m = /^response\/fragments\/(\d+)\/content$/.exec(obj.p);
-        if (m) {
-          const i = Number(m[1]);
-          frags.set(i, (frags.get(i) || '') + obj.v);
-        }
-      }
-      // 结束帧
-      if (obj.p === 'response' && obj.o === 'SET' && obj.v && obj.v.status) {
-        if (obj.v.status === 'FINISHED') { sawFinish = true; }
-      }
-      if (obj.v && obj.v.status === 'FINISHED') { sawFinish = true; }
-    }
-    if (Date.now() - t0 > 120000) { break; }
-  }
-
-  // 正文 = 所有 RESPONSE 类片段拼接（这里取第 1 个之后的非 THINK 片段；
-  // 简化处理：把所有 fragment 内容拼起来，THINK 内容通常在最前置的片段）
-  answerText = [...frags.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([, v]) => v)
-    .join('');
-
-  console.log(info(`收到 ${frames} 帧，片段数=${frags.size}，耗时=${Date.now() - t0}ms`));
-  check('收到流式帧', frames > 0);
-  check('正文非空', answerText.length > 0, `长度=${answerText.length}`);
-  check('收到结束态', sawFinish);
-  console.log('');
-  console.log('  ── 回答正文 ──');
-  console.log('  ' + answerText.trim().slice(0, 500).replace(/\n/g, '\n  '));
-  console.log('  ──────────────');
+  const text = await r.text();
+  return { status: r.status, body: text, sentBody: body };
 }
-console.log('');
 
-// -------------------------------------------- 4. 历史消息能读回来
-console.log('【4】历史消息回读');
+function consume(text) {
+  const dec = new SseDecoder();
+  const acc = new ToolCallAccum();
+  let content = '', reasoning = '', sawDone = false, frames = 0;
+  for (const p of dec.feed(text)) {
+    if (p === '[DONE]') { sawDone = true; break; }
+    frames++;
+    acc.ingest(p);
+    const d = SseChunk.parse(p);
+    if (d === null) continue;
+    content += d.content;
+    reasoning += d.reasoning;
+  }
+  return { content, reasoning, sawDone, frames, toolCalls: acc.list() };
+}
+
+// ---------------------------------------------------------------------------
+console.log('1. 非流式对话');
 {
-  const r = await fetch(ORIGIN + '/api/v0/chat/history_messages?chat_session_id=' + sessionId, {
-    method: 'GET', headers: H,
-  });
-  const j = await r.json();
-  check('history_messages 返回 0', j.code === 0, `code=${j.code}`);
-  const msgs = j.data?.biz_data?.chat_messages ?? [];
-  console.log(info(`取回 ${msgs.length} 条消息`));
+  const msgs = [{ role: 'user', content: '只回复两个字：你好', ts: Date.now() }];
+  const req = { apiKey: API_KEY, model: 'deepseek-flash', messages: msgs,
+    stream: false, thinking: false, search: false };
+  const r = await callApi(req, msgs);
+  ok('HTTP 200', r.status === 200, 'status=' + r.status);
+  let full = '';
+  try { full = SseChunk.parseFull(r.body); } catch (e) { full = ''; }
+  ok('能解析出正文', full.length > 0, 'content=' + JSON.stringify(full).substring(0, 60));
+  ok('请求体含 thinking=disabled（显式关闭思考）',
+    r.sentBody.includes('"thinking":{"type":"disabled"}'));
 }
-console.log('');
 
-// ============================================================================
-// 【5】多轮连续对话 —— 专门盯「聊两轮之后再也发不出去」
-//
-// 为什么要单独一个用例：
-//   用户反馈「对话超过两次之后就达上限、无法继续」。这个现象只在
-//   **同一个会话里连续多轮**才会出现，单轮用例永远测不到。
-//   根因是 `preempt:false` 的排队语义 + 服务端残留的僵尸流：
-//   第 3 轮开始请求会被挂在服务端，客户端一帧都收不到。
-//
-//   本用例连发 3 轮并逐轮打印 code / 帧数 / 耗时。
-//   判定标准：**每一轮都必须在 timeout 内收到帧**。
-//   如果第 N 轮 0 帧且超时 → 复现成功，说明 preempt 仍是 false。
-// ============================================================================
-if (!process.env.SKIP_MULTITURN) {
-  console.log('【5】多轮连续对话（复现 / 回归「聊两轮后就发不出去」）');
-  const ROUNDS = 3;
-  const PER_ROUND_MS = 60000;
-  let prevAssistantId = null;
+// ---------------------------------------------------------------------------
+console.log('\n2. 流式对话');
+{
+  const msgs = [{ role: 'user', content: '从1数到5，只要数字', ts: Date.now() }];
+  const req = { apiKey: API_KEY, model: 'deepseek-flash', messages: msgs,
+    stream: true, thinking: false, search: false };
+  const r = await callApi(req, msgs);
+  ok('HTTP 200', r.status === 200, 'status=' + r.status);
+  const c = consume(r.body);
+  ok('收到多个 SSE 帧', c.frames >= 3, 'frames=' + c.frames);
+  ok('以 [DONE] 结束', c.sawDone);
+  ok('正文非空', c.content.length > 0, JSON.stringify(c.content).substring(0, 60));
+  ok('关闭思考时无 reasoning', c.reasoning.length === 0, 'len=' + c.reasoning.length);
+}
 
-  for (let round = 1; round <= ROUNDS; round++) {
-    const ask = `第${round}轮：只回复数字 ${round}`;
-    const powR = await fetch(ORIGIN + '/api/v0/chat/create_pow_challenge', {
-      method: 'POST', headers: H,
-      body: JSON.stringify({ target_path: '/api/v0/chat/completion' }),
-    });
-    const powJ = await powR.json();
-    if (powJ.code !== 0) { check(`第 ${round} 轮取 PoW`, false, `code=${powJ.code}`); break; }
-    const c = powJ.data.biz_data.challenge;
-    const { DeepSeekHash } = await loadDeepSeekHash();
-    const answer = DeepSeekHash.searchRange(
-      `${c.salt}_${c.expire_at}_`, c.challenge, 0, c.difficulty);
-    const powB64 = Buffer.from(JSON.stringify({
-      algorithm: c.algorithm, challenge: c.challenge, salt: c.salt,
-      answer, signature: c.signature, target_path: '/api/v0/chat/completion',
-    })).toString('base64');
+// ---------------------------------------------------------------------------
+console.log('\n3. 思考模式（reasoning_content 应下发）');
+{
+  const msgs = [{ role: 'user', content: '1+1等于几', ts: Date.now() }];
+  const req = { apiKey: API_KEY, model: 'deepseek-flash', messages: msgs,
+    stream: true, thinking: true, search: false };
+  const r = await callApi(req, msgs);
+  ok('HTTP 200', r.status === 200, 'status=' + r.status);
+  const c = consume(r.body);
+  ok('收到 reasoning 内容', c.reasoning.length > 0, 'len=' + c.reasoning.length);
+  ok('最终正文非空', c.content.length > 0, JSON.stringify(c.content).substring(0, 60));
+}
 
-    const bodyObj = {
-      chat_session_id: sessionId,
-      prompt: ask,
-      ref_file_ids: [],
-      thinking_enabled: false,
-      search_enabled: false,
-      // ★ 与 App 保持一致：必须是 true。改成 false 就能复现挂死。
-      preempt: true,
-      model_type: 'default',
-    };
-    if (prevAssistantId) { bodyObj.parent_message_id = prevAssistantId; }
+// ---------------------------------------------------------------------------
+console.log('\n4. ★ 联网搜索完整往返');
+{
+  const msgs = [{ role: 'user', content: '今天有什么科技新闻？用一句话说。', ts: Date.now() }];
+  const req = { apiKey: API_KEY, model: 'deepseek-flash', messages: msgs,
+    stream: true, thinking: false, search: true };
 
-    const t0 = Date.now();
-    let r;
+  const r1 = await callApi(req, msgs);
+  ok('第一轮 HTTP 200', r1.status === 200, 'status=' + r1.status);
+  ok('第一轮请求带上了 tools', r1.sentBody.includes('"tools"'));
+  const c1 = consume(r1.body);
+  ok('模型返回了 tool_calls', c1.toolCalls.length > 0,
+    'content=' + JSON.stringify(c1.content).substring(0, 50));
+
+  if (c1.toolCalls.length === 0) {
+    console.log('    （模型这次没调工具，跳过搜索往返验证）');
+  } else {
+    const q = parseQuery(c1.toolCalls[0].arguments);
+    ok('能解出搜索关键词', q.length > 0, 'query=' + JSON.stringify(q));
+    console.log('    模型要搜: ' + q);
+
+    let html = '';
     try {
-      r = await fetch(ORIGIN + '/api/v0/chat/completion', {
-        method: 'POST',
-        headers: { ...H, 'Accept': 'text/event-stream', 'X-DS-PoW-Response': powB64 },
-        body: JSON.stringify(bodyObj),
-        signal: AbortSignal.timeout(PER_ROUND_MS),
-      });
-    } catch (e) {
-      check(`第 ${round} 轮收到响应`, false,
-        `挂死/超时 ${Date.now() - t0}ms（${e.name}）← 这就是「发不出去」的现象`);
-      break;
-    }
-
-    // 边读边计时，超时就判挂死
-    const reader = r.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '', roundFrames = 0, roundErr = null, newMsgId = null, sawDone = false;
-    const tRead = Date.now();
-    try {
-      while (true) {
-        if (Date.now() - tRead > PER_ROUND_MS) { throw new Error('read_timeout'); }
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let nl;
-        while ((nl = buf.indexOf('\n')) >= 0) {
-          const line = buf.slice(0, nl).replace(/\r$/, '');
-          buf = buf.slice(nl + 1);
-          if (!line.startsWith('data:')) continue;
-          const payload = line.slice(5).trim();
-          if (!payload) continue;
-          roundFrames++;
-          let obj; try { obj = JSON.parse(payload); } catch { continue; }
-          if (typeof obj.code === 'number' && obj.code !== 0) roundErr = obj;
-          // 首帧 response 对象里的 message_id —— 下一轮 parent 要用它
-          const resp = obj.v?.response ?? obj.v;
-          if (resp && typeof resp === 'object') {
-            if (resp.message_id || resp.messageId || resp.id) {
-              newMsgId = resp.message_id || resp.messageId || resp.id;
-            }
-          }
-          if (obj.v && obj.v.status === 'FINISHED') sawDone = true;
-          if (obj.p === 'response' && obj.o === 'SET' && obj.v?.status === 'FINISHED') sawDone = true;
+      const url = 'https://cn.bing.com/search?q=' + encodeURIComponent(q) + '&setlang=zh-CN&ensearch=0';
+      const br = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+          'Accept-Language': 'zh-CN,zh;q=0.9'
         }
-      }
+      });
+      html = await br.text();
     } catch (e) {
-      roundErr = { code: 'LOCAL', msg: e.message };
+      html = '';
     }
+    ok('Bing 抓取成功', html.length > 0, 'len=' + html.length);
+    const items = parseBing(html);
+    ok('解析出搜索结果', items.length > 0, '条数=' + items.length);
+    if (items.length > 0) {
+      console.log('    取到 ' + items.length + ' 条，首条: ' + items[0].title.substring(0, 40));
+    }
+    const toolText = formatForModel(q, items.slice(0, 5));
 
-    const ms = Date.now() - t0;
-    if (roundErr && roundErr.code !== 'LOCAL') {
-      check(`第 ${round} 轮`, false, `服务端错误 code=${roundErr.code} msg=${roundErr.msg}`);
-      break;
+    msgs.push({ role: 'assistant', content: '', toolCalls: c1.toolCalls, ts: Date.now() });
+    msgs.push({ role: 'tool', content: toolText, toolCallId: c1.toolCalls[0].id, ts: Date.now() });
+
+    const seqErrs = validateApiSequence(msgs);
+    ok('回灌后的消息序列合法（真校验器）', seqErrs.length === 0, seqErrs.join('; '));
+
+    const r2 = await callApi(req, msgs);
+    ok('第二轮 HTTP 200', r2.status === 200, 'status=' + r2.status);
+    if (r2.status !== 200) {
+      console.log('    响应: ' + r2.body.substring(0, 300));
     }
-    check(`第 ${round} 轮收到流式数据`, roundFrames > 0,
-      `帧数=${roundFrames} 耗时=${ms}ms ${sawDone ? '已结束' : '未收到结束态'}`);
-    if (roundFrames === 0) {
-      console.log(info('⚠ 复现成功：服务端接受了连接但一个字节都没回。'));
-      console.log(info('  检查 completion 请求体里的 preempt 是否为 true。'));
-      break;
-    }
-    if (newMsgId) {
-      prevAssistantId = newMsgId;
-      console.log(info(`  ↑ 服务端 message_id=${newMsgId.slice(0, 12)}…（下一轮 parent_message_id）`));
-    } else {
-      // 拿不到 id 就用历史接口取最近一条 assistant id，保证链路连续
-      try {
-        const hr = await fetch(ORIGIN + '/api/v0/chat/history_messages?chat_session_id=' + sessionId,
-          { method: 'GET', headers: H });
-        const hj = await hr.json();
-        const msgs = hj.data?.biz_data?.chat_messages ?? [];
-        const lastA = [...msgs].reverse().find((m) => m.role === 'ASSISTANT');
-        if (lastA) prevAssistantId = lastA.id;
-        console.log(info(`  ↑ 从历史接口取到 parent=${String(prevAssistantId).slice(0, 12)}…`));
-      } catch { /* 拿不到就下一轮不带 parent，不影响挂死判定 */ }
+    const c2 = consume(r2.body);
+    ok('第二轮有正文回答', c2.content.length > 0, JSON.stringify(c2.content).substring(0, 80));
+    if (c2.content.length > 0) {
+      console.log('    最终回答: ' + c2.content.replace(/\n/g, ' ').substring(0, 100));
     }
   }
-  console.log('');
 }
 
-// ------------------------------------------------------------- 汇总
-if (failures === 0) {
-  console.log('\x1b[32m全部通过\x1b[0m —— PoW、鉴权、SSE 对话、历史回读均正常');
-} else {
-  console.log(`\x1b[31m${failures} 项失败\x1b[0m`);
-  process.exitCode = 1;
+// ---------------------------------------------------------------------------
+console.log('\n5. 错误路径（错误密钥）');
+{
+  const msgs = [{ role: 'user', content: 'hi', ts: Date.now() }];
+  const req = { apiKey: 'sk-0000000000000000000000000000dead', model: 'deepseek-flash',
+    messages: msgs, stream: false, thinking: false, search: false };
+  const r = await callApi(req, msgs);
+  ok('返回非 200', r.status !== 200, 'status=' + r.status);
+  const em = ErrMapper.from(r.status, r.body);
+  ok('分流为「鉴权失败」', em.code === -2, 'code=' + em.code);
+  ok('文案指名密钥', em.message.includes('密钥'), em.message);
+  console.log('    用户看到的文案: ' + em.message);
 }
+
+// ---------------------------------------------------------------------------
+console.log('\n=== 结果 ===');
+console.log(`通过 ${pass} / 失败 ${fail}`);
+if (fail > 0) {
+  console.log('\n失败项：');
+  for (const f of failures) console.log('  ✗ ' + f);
+  process.exit(1);
+}
+console.log('全部通过 ✓');

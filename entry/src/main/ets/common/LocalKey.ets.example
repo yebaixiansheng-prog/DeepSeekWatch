@@ -1,0 +1,31 @@
+/**
+ * ★ 本地 API 密钥 —— 模板文件
+ *
+ * 用法：
+ *   把本文件复制为同目录下的 `LocalKey.ets`，填入你自己的密钥：
+ *
+ *     cp entry/src/main/ets/common/LocalKey.ets.example \
+ *        entry/src/main/ets/common/LocalKey.ets
+ *
+ *   然后编辑 `LocalKey.ets`，把 VALUE 改成 `'sk-你的密钥'`。
+ *   （`./tools/build.sh` 会在文件不存在时自动从本模板生成，所以
+ *     你也可以直接跳过这一步，构建时再填。）
+ *
+ * 为什么真实密钥不放在版本库里：
+ *   本仓库是**公开**的。GitHub 上扫 `sk-` 前缀的爬虫是**分钟级**的 ——
+ *   密钥一旦提交，几分钟内就会被抓走盗刷。这不是理论风险，是常态。
+ *
+ *   所以：
+ *     · 本模板（`.example`）入库，保证任何人 clone 后**能编译**；
+ *     · `LocalKey.ets` 在 `.gitignore` 里，**永远不会被提交**；
+ *     · 仓库还带了一个 pre-commit 钩子（`tools/pre-commit`）作为第二层保险，
+ *       即使误操作 `git add -A` 也会被拦住。
+ *
+ * 也可以不填这里：应用设置页里填的密钥会存进 Preferences 并优先使用。
+ * 两者都没有时，应用会明确提示「尚未配置 API 密钥」——
+ * 不会用一个假密钥去请求然后报一堆看不懂的网络错误。
+ */
+export class LocalKey {
+  /** 你的 DeepSeek API 密钥（`sk-` 开头）。留空则需在应用设置里填写。 */
+  static readonly VALUE: string = '';
+}

@@ -1,15 +1,78 @@
 # 交接文档 — 给「下一个 AI」（DeepSeek 手表版 HarmonyOS 工程）
 
 > 阅读对象：接手本工程、继续做手表端功能开发与真机验证的 AI。
-> 最后更新：**2026-09-19**（本轮完成：**Bug 18 —— `message_id` 跨轮去重导致僵尸流清不掉**，SSE 回归扩到 19 项并做了注入测试）
-> 上一轮（2026-09-18）完成：登录风控修复、**多轮对话挂死修复**、静默看门狗、AI 执行手册
-> 配套阅读：`docs/API_SPEC.md`（接口逆向规格，必读）、`docs/交接文件清单.md`（打包给第三方的文件清单）、`docs/鸿蒙开发实战教程.md`（第 9 章是六个真实 Bug 的完整复盘）、**`docs/鸿蒙手表应用开发_AI执行手册.md`（给另一个 AI 的独立开发手册，用于并行开发其他手表应用）**。
->
-> 本文定位：让下一个 AI 在 **10 分钟内** 接手，知道「已经做到哪、卡在哪、下一步改哪、怎么验证」。
+> 最后更新：**2026-09-30**（本轮：**推倒重来 —— 从网页版逆向改为官方 API**）
 
 ---
 
-## 0. 一页纸速览（TL;DR）
+## ⚠️⚠️ 先读这一节：本文档的 v1 部分已过时
+
+**2026-09-30 做了一次推倒重来**：整个应用从「逆向 `chat.deepseek.com` 网页版私有协议」
+改为「调用 `api.deepseek.com` 官方开放平台」。
+
+**第 1 节之后的所有内容都是 v1 时代的记录**，其中：
+
+| 章节主题 | 在 v2 里的状态 |
+|---|---|
+| PoW 工作量证明（含 C++ NAPI 加速） | ❌ **已删除**。官方 API 无 PoW |
+| 设备指纹 / UA / `RISK_DEVICE_DETECTED` 风控 | ❌ **已删除**。官方 API 用 Bearer 密钥 |
+| 私有 SSE 帧格式 / `message_id` 去重 / `stop_stream` | ❌ **已删除**。官方 API 是标准 OpenAI SSE |
+| `preempt` 排队语义（Bug 16） | ❌ **已删除**。官方 API 无此字段 |
+| 账号密码登录 / 微信扫码登录 | ❌ **已删除**。官方 API 用内置密钥，无登录流程 |
+| **圆屏几何 / 表冠 / 输入法 / ArkUI 渲染** | ✅ **仍然有效**，这些与协议无关，继续沿用 |
+
+**v2 的完整说明请看 [`docs/官方API架构_v2.md`](官方API架构_v2.md)** —— 那是当前唯一准确的架构文档。
+
+v1 的代码已备份到 `legacy_backup/`（**不进 git**），只作回退保险。
+
+**为什么本文档还留着**：里面关于**圆屏适配、真机调试纪律、ArkUI 状态渲染**
+的踩坑记录（第 3~6 节等）在 v2 里**依然适用**，那些是平台知识不是协议知识。
+读的时候请**只取这些部分**。
+
+---
+
+## 0. 一页纸速览（TL;DR · v2 版）
+
+| 项 | 内容 |
+|---|---|
+| 工程路径 | `D:\HarmonyBuild\DeepSeekWatch` |
+| 包名 | `com.dswatch.round`（穿戴设备 wearable） |
+| 形态 | HarmonyOS 圆形手表 App，**纯 ArkTS/ArkUI**（v2 起无 C++ 模块） |
+| **协议** | **DeepSeek 官方开放平台** `POST https://api.deepseek.com/chat/completions` |
+| **鉴权** | **一个 API 密钥**（`Authorization: Bearer`），无登录流程、无 PoW、无风控 |
+| **模型** | `deepseek-flash`（默认）/ `deepseek-v4-pro` |
+| 构建产物 | `entry/build/default/outputs/default/entry-default-signed.hap`（**约 195KB**，v1 是 1.6MB） |
+| 代码量 | 约 2000 行（v1 约 7000 行） |
+| **核心文件** | `model/ApiClient.ets`（HTTP+SSE+工具循环）<br>`model/SearchService.ets`（联网搜索）<br>`model/ChatStore.ets`（本地历史+裁剪+校验）<br>`model/AppConfig.ets`（设置）<br>`pages/ChatPage.ets`（对话+设置） |
+| **★ 最大的坑** | **`thinking` 字段省略 = 默认开启思考**。实测不传该字段时，`max_tokens=10` 会被 `reasoning_content` 全部吃掉、`content` 为空串 → 手表上表现为「一直转圈不出字」。**必须显式传** `{"type":"disabled"}` |
+| **联网搜索** | 官方 API **没有**内置搜索。用 **function calling + 客户端抓 Bing** 实现，**不需要第三方密钥**，已实测跑通（详见 v2 文档 §4） |
+| **密钥位置** | `entry/src/main/ets/common/LocalKey.ets`（**在 .gitignore 里，绝不入库**）<br>模板 `LocalKey.ets.example` 入库保证可编译<br>`tools/pre-commit` 是第二层保险 |
+| 离线验证 | `node tools/api-protocol-test.mjs`（**116 项**）<br>`python tools/mutate.py all`（**10 个注入点**）<br>`node tools/live-e2e.mjs`（**23 项**，打真实 API） |
+| **真机状态** | ⚠️ **截至 2026-09-30 20:50 手表不在线**：`ping <历史IP>` 返回「**无法访问目标主机**」= 该 IP 已不存在（DHCP 变了）。**需用户在手表上重开「通过 WLAN 调试」读新地址** |
+
+### v2 的三个关键教训（写下来给下一个人）
+
+1. **注入测试抓到了「假绿」（最重要的一条）**
+   `trimForSend` 里「回溯避免孤立 tool 消息」的分支，**从没被执行过** ——
+   当时用例的裁剪落点恰好是 `assistant`，绕过了那条 `while`。
+   删掉它测试**依然全绿**。
+   → **代码是对的，但「它对的证据」是假的。**
+   修法不是改参数，而是抽出 `validateApiSequence` 断言**结构不变量**，
+   并对**所有 max 取值**穷举验证。详见 v2 文档 §7.3。
+
+2. **任何依赖服务端默认值的字段，都必须显式传**
+   `thinking` 省略 ≠ 关闭思考。默认值会变，而「省略」这个行为在代码里看不出来。
+
+3. **公开仓库里的密钥是分钟级泄露**
+   GitHub 上扫 `sk-` 前缀的爬虫是分钟级的。
+   方案：模板入库 + 真实密钥 gitignore + pre-commit 钩子三重保护。
+
+---
+
+## 0b. v1 时代的一页纸速览（**已过时，仅作历史参考**）
+
+> 下面这张表是 2026-09-19 写的，描述的是已被删除的网页版逆向架构。
+> 保留它是为了让接手的人理解「为什么当初那么复杂、为什么现在不复杂了」。
 
 | 项 | 内容 |
 |---|---|

@@ -1,8 +1,7 @@
 {
   "src": [
     "pages/Index",
-    "pages/LoginPage",
     "pages/ChatPage",
-    "pages/HistoryPage"
+    "pages/SessionsPage"
   ]
 }

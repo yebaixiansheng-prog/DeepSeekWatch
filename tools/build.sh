@@ -27,6 +27,24 @@ cd "$ROOT"
 CACHE_DIR="entry/build/default/cache/default"
 OUT_DIR="entry/build/default/outputs/default"
 
+# —— API 密钥文件：不存在就从模板生成 ——
+#   `LocalKey.ets` 在 .gitignore 里（真实密钥绝不进公开仓库），
+#   模板 `LocalKey.ets.example` 入库。这里保证「clone 后直接构建」不会
+#   因为缺文件而编译失败 —— 但生成的是一份**空密钥**，
+#   应用会明确提示「尚未配置 API 密钥」，而不是报一堆网络错误。
+KEY_FILE="entry/src/main/ets/common/LocalKey.ets"
+KEY_TPL="entry/src/main/ets/common/LocalKey.ets.example"
+if [ ! -f "$KEY_FILE" ]; then
+  if [ -f "$KEY_TPL" ]; then
+    cp "$KEY_TPL" "$KEY_FILE"
+    echo "[build] 未找到 $KEY_FILE，已从模板生成（密钥为空）。"
+    echo "[build]   请在应用「设置 → API 密钥」里填写，或直接编辑该文件填入 sk- 密钥。"
+  else
+    echo "[build] 错误：缺少 $KEY_FILE 且找不到模板 $KEY_TPL"
+    exit 1
+  fi
+fi
+
 # —— --full：把旧缓存/旧产物挪走（mv，不是 rm）——
 if [ "${1:-}" = "--full" ]; then
   # 若已有 .bak，先把它挪到 outputs 之外的临时名，避免 mv 到已存在的目录里

@@ -3,29 +3,23 @@ import window from '@ohos.window';
 import { BusinessError } from '@ohos.base';
 import { Store } from '../common/Store';
 import { Round } from '../common/RoundScreen';
-import { DeepSeekHash } from '../common/DeepSeekHash';
-import { AuthService } from '../model/AuthService';
+import { AppConfig } from '../model/AppConfig';
 
 const TAG: string = 'Boot';
 
 export default class EntryAbility extends UIAbility {
   onCreate(): void {
-    // 初始化本地存储（异步，页面侧会 await 同一个 Promise）
+    // 本地存储（异步；页面侧发消息前会 await 配置加载）
     Store.init(this.context);
 
-    // ★ 启动自检：DeepSeekHashV1 移植是否正确，直接决定 PoW 能否过。
-    //   手表上无法单步调试，只能在 hilog 里看这一行结论。
-    //   查看： hdc shell "hilog -x | grep Boot"
-    const ok: boolean = DeepSeekHash.selfTest();
-    console.info(TAG + ' selfTest=' + (ok ? 'PASS' : 'FAIL'));
-
-    // ★ 预热设备 ID 同步缓存：让「冷启动后第一个请求」就能带上
-    //   x-ds-device-id 头。否则那个请求是不带设备标识的，
-    //   在风控敏感的网络出口下最容易被打回。
-    AuthService.warmUp().then(() => {
-      console.info(TAG + ' deviceId ready');
-    }).catch((e: BusinessError) => {
-      console.warn(TAG + ' deviceId warmUp failed: ' + e.message);
+    // 加载配置（API 密钥 / 模型 / 开关）
+    AppConfig.load().then(() => {
+      console.info(TAG + ' config ready, hasKey=' + (AppConfig.hasKey() ? 'Y' : 'N')
+        + ' model=' + AppConfig.model()
+        + ' thinking=' + (AppConfig.thinking() ? 'Y' : 'N')
+        + ' search=' + (AppConfig.search() ? 'Y' : 'N'));
+    }).catch(() => {
+      console.warn(TAG + ' config load failed');
     });
   }
 
@@ -34,18 +28,20 @@ export default class EntryAbility extends UIAbility {
       if (err.code !== 0) {
         return;
       }
-      // 全屏沉浸，圆形表盘没有状态栏
       const win: window.Window = windowStage.getMainWindowSync();
-      win.setWindowLayoutFullScreen(true).catch((e: BusinessError) => {
+
+      // 全屏沉浸：圆形表盘没有状态栏
+      win.setWindowLayoutFullScreen(true).catch(() => {
       });
 
       // 读取实际屏幕尺寸，供圆形适配使用
       const rect: window.Rect = win.getWindowProperties().windowRect;
       Round.screenW = rect.width;
       Round.screenH = rect.height;
+      console.info(TAG + ' screen=' + Round.screenW.toString() + 'x' + Round.screenH.toString());
 
-      // 手表常亮策略：保持屏幕
-      win.setWindowKeepScreenOn(true).catch((e: BusinessError) => {
+      // 对话中需要保持常亮（长回答不该走到一半熄屏）
+      win.setWindowKeepScreenOn(true).catch(() => {
       });
     });
   }

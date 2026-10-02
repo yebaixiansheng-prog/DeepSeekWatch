@@ -62,6 +62,17 @@ tools/_wasmtest/
 .env.*
 *.token
 
+# ★★ 本地 API 密钥 —— 绝对不能提交
+#   本仓库是公开的，GitHub 上扫 `sk-` 前缀的爬虫是分钟级的。
+#   模板 LocalKey.ets.example 入库（保证 clone 能编译），
+#   真实密钥填在 LocalKey.ets 里，由本行 + tools/pre-commit 双重保护。
+LocalKey.ets
+.apikey
+!LocalKey.ets.example
+
 # 会话/工具临时目录（含截图等中间产物），不入库
 .workbuddy-ai/
 .git-msg.tmp
+
+# 旧协议代码备份（仅本地保险，不进版本库）
+legacy_backup/

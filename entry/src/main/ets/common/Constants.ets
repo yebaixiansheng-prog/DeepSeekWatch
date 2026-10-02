@@ -1,248 +1,168 @@
 /**
- * DeepSeek 服务端契约常量
- * 全部来自 2026-09 对 chat.deepseek.com 前端 bundle 的实测逆向，详见 docs/API_SPEC.md
+ * 官方 API 契约常量
+ *
+ * ★ 2026-09-30 推倒重来
+ *   本文件替代了旧的 `Constants.ets`（那是 chat.deepseek.com 网页版的逆向契约，
+ *   含 PoW / 设备指纹 / 私有 SSE 帧格式，已全部删除）。
+ *
+ *   现在走 **DeepSeek 官方开放平台**：标准 OpenAI 兼容协议。
+ *   实测结论（2026-09-30，curl 直连）：
+ *     · 端点      POST https://api.deepseek.com/chat/completions
+ *     · 鉴权      `Authorization: Bearer <API_KEY>`（不需要任何设备指纹/PoW）
+ *     · 流式      标准 SSE，`data: {...}` 逐块，`choices[0].delta.content`
+ *     · 结束      `data: [DONE]`
+ *     · 模型      deepseek-flash / deepseek-v4-pro
  */
 
+import { LocalKey } from './LocalKey';
+
 export class DsApi {
-  // ---- 基础 ----
-  static readonly ORIGIN: string = 'https://chat.deepseek.com';
-  static readonly PREFIX: string = '/api/v0';
-
-  // ---- 登录（仅密码登录，无验证码、无人机验证）----
-  static readonly LOGIN: string = '/api/v0/users/login';
-  static readonly LOGOUT: string = '/api/v0/users/logout_all_sessions';
-  static readonly CURRENT_USER: string = '/api/v0/users/current';
-  static readonly USER_SETTINGS: string = '/api/v0/users/settings';
-  static readonly CLIENT_SETTINGS: string = '/api/v0/client/settings';
-
-  // ---- 会话 ----
-  static readonly SESSION_CREATE: string = '/api/v0/chat_session/create';
-  static readonly SESSION_FETCH: string = '/api/v0/chat_session/fetch_page';
-  static readonly SESSION_DELETE: string = '/api/v0/chat_session/delete';
-  static readonly SESSION_TITLE: string = '/api/v0/chat_session/update_title';
-
-  // ---- 对话 ----
-  static readonly HISTORY: string = '/api/v0/chat/history_messages';
-  static readonly COMPLETION: string = '/api/v0/chat/completion';
-  static readonly STOP_STREAM: string = '/api/v0/chat/stop_stream';
-  static readonly REGENERATE: string = '/api/v0/chat/regenerate';
-  static readonly CONTINUE: string = '/api/v0/chat/continue';
-
-  // ---- PoW ----
-  static readonly POW_CHALLENGE: string = '/api/v0/chat/create_pow_challenge';
-
-  // ---- 微信扫码登录（2026-09-19 对线上 bundle main.7d19d7e901.js 逆向实测）----
-  /**
-   * 用 OAuth 授权码换 DeepSeek userToken
-   *
-   * ⚠️ 这是**普通 JSON POST**（不是 SSE），body 为 `{nonce, provider}`。
-   *    响应：`{code, data:{biz_code, biz_data:{token}}}`
-   *    —— token 在 `biz_data.token`，**与密码登录在 `biz_data.user.token` 不同**。
-   *
-   * ⚠️ `nonce` 由服务端在 OAuth 回调跳转时带上，**客户端无法自行构造**。
-   *    因此 ArkTS 端只有在「拿到 nonce」时才能调它（见 docs/微信扫码登录_设计与可行性.md 第 3 节）。
-   */
-  static readonly OAUTH_GET_TOKEN: string = '/oauth/get_token';
-
-  /** 微信 JSSDK 签名（取 appid/timestamp/noncestr/signature），query 传 url */
-  static readonly WECHAT_JSSDK_SIGNATURE: string = '/api/v0/client/wechat_js_sdk_signature';
-
-  /** OAuth 回调地址（微信扫码确认后由微信重定向到此，服务端再带 nonce 跳回客户端） */
-  static readonly OAUTH_WECHAT_CALLBACK: string = '/oauth/wechat/callback';
+  /** 官方 API 根 */
+  static readonly ORIGIN: string = 'https://api.deepseek.com';
+  /** 对话补全（流式/非流式同一个端点，靠 body 里的 stream 区分） */
+  static readonly CHAT: string = '/chat/completions';
+  /** 余额查询（用于设置页显示，可选） */
+  static readonly BALANCE: string = '/user/balance';
 }
 
 /**
- * 请求头
+ * ★★ API 密钥
  *
- * ⚠️ 关于 User-Agent（2026-09-18 修正）：
- *   早期版本用的是 `Mozilla/5.0 (Linux; HarmonyOS; HUAWEI WATCH) …`，
- *   这是一个**没有任何真实浏览器发送过的 UA**：它自称 Mozilla/Safari
- *   却又不带 Chrome/Safari 的版本号与渲染引擎版本。
- *   DeepSeek 的风控把它和「脚本/非常规客户端」关联，
- *   直接触发 `RISK_DEVICE_DETECTED`（biz_code=11）。
- *   这里改成一个**结构完整的常规客户端 UA**：仍然是移动端（和手表定位一致）、
- *   有完整的 Chrome 版本号与平台标记，在风控侧不再显眼。
+ * 密钥**不写在本文件里**，而是放在 `LocalKey.ets`。原因：
+ *   本仓库是**公开**的，GitHub 上扫 `sk-` 前缀的爬虫是**分钟级**的 ——
+ *   密钥一旦提交，几分钟内就会被抓走盗刷。这不是理论风险，是常态。
+ *
+ *   `LocalKey.ets` 在版本库里是**空值**（保证任何人 clone 都能编译），
+ *   你自己的真实密钥填在本地那一份里，由 `.gitignore` + pre-commit 钩子
+ *   保证永远不会被提交。
+ *
+ * 优先级：设置页填的（存 Preferences） > LocalKey.ets > 空
+ *   读不到任何密钥时，应用会明确提示「尚未配置 API 密钥」，
+ *   **不会**用一个假密钥去请求然后报一堆看不懂的网络错误。
+ *   （纪律：「未配置」和「网络失败」是两种错误，不许复用同一句文案。）
  */
+export class ApiKey {
+  /** 内置密钥（来自本地文件；仓库里为空串） */
+  static readonly BUILTIN: string = LocalKey.VALUE;
+}
+
+/** 模型 ID（实测可用） */
+export class Model {
+  /** 快速版：响应快、便宜，手表默认 */
+  static readonly FLASH: string = 'deepseek-flash';
+  /** 专业版：能力更强，可切换 */
+  static readonly PRO: string = 'deepseek-v4-pro';
+
+  static all(): string[] {
+    return [Model.FLASH, Model.PRO];
+  }
+
+  static label(m: string): string {
+    if (m === Model.PRO) {
+      return '专业版';
+    }
+    return '快速版';
+  }
+}
+
+/**
+ * 思考模式
+ *
+ * ★ 实测踩坑（2026-09-30）：
+ *   **不传 `thinking` 字段时，默认是「开启思考」**。
+ *   实测 `{"model":"deepseek-flash"}` + `max_tokens:10` 的响应：
+ *     `content: ""`，10 个 token 全部花在 `reasoning_content` 上。
+ *   → 手表场景必须先看到文字，所以**默认关闭**，由用户在设置里开。
+ *   → 关闭方式是显式传 `thinking: {type: 'disabled'}`，不能靠省略。
+ */
+export class Thinking {
+  static readonly ON: string = 'enabled';
+  static readonly OFF: string = 'disabled';
+}
+
+/** 角色 */
+export class Role {
+  static readonly SYSTEM: string = 'system';
+  static readonly USER: string = 'user';
+  static readonly ASSISTANT: string = 'assistant';
+  /** 工具执行结果回灌 */
+  static readonly TOOL: string = 'tool';
+}
+
+/**
+ * 联网搜索
+ *
+ * ★ 方案（2026-09-30 实测确定，无需任何第三方密钥）：
+ *   DeepSeek 官方 API **没有**内置联网搜索，但支持标准 `tools` / function calling
+ *   （已实测：模型会正确返回 `tool_calls`，`finish_reason: "tool_calls"`）。
+ *   借这条路做「客户端执行搜索」：
+ *     ① 请求带上 `web_search` 工具声明；
+ *     ② 模型判断需要实时信息 → 返回 `tool_calls`，参数是 `{"query": "..."}`；
+ *     ③ **客户端**去抓 Bing 搜索结果页，解析出标题/链接/摘要；
+ *     ④ 把结果作为 `role: tool` 消息追加进对话，再发一次请求；
+ *     ⑤ 模型基于真实搜索结果作答。
+ *
+ *   ⚠️ 兜底：搜索源可能改版或不可达。任何一步失败都必须
+ *      ① 明确告知用户「搜索没成功」，② 让对话**继续**（不要卡死），
+ *      ③ 把失败原因告诉模型，让它可以诚实回答「我没搜到」。
+ *      绝不允许「搜索失败 → 整个回答失败」。
+ */
+export class SearchCfg {
+  /** 工具名（发给模型的 function name） */
+  static readonly TOOL_NAME: string = 'web_search';
+  /** 搜索源：Bing 中文站（实测可达，返回真实结果页） */
+  static readonly ENDPOINT: string = 'https://cn.bing.com/search';
+  /** 抓取超时（ms） */
+  static readonly TIMEOUT_MS: number = 12000;
+  /** 最多取几条结果灌给模型（多了吃 token，手表上下文紧张） */
+  static readonly MAX_RESULTS: number = 5;
+  /** 单次多轮工具调用上限，防「模型无限调工具」死循环 */
+  static readonly MAX_ROUNDS: number = 2;
+}
+
+/** 请求头 */
 export class DsHeader {
   static readonly AUTH: string = 'Authorization';
   static readonly CONTENT_TYPE: string = 'Content-Type';
-  static readonly POW: string = 'X-DS-PoW-Response';
-  static readonly GUEST_POW: string = 'X-DS-Guest-PoW-Response';
-  static readonly DEVICE_ID: string = 'x-ds-device-id';
-  static readonly TRACE_ID: string = 'x-ds-trace-id';
-  /** 平台标识：web 客户端也带，缺失会被当成未知客户端 */
-  static readonly PLATFORM: string = 'x-ds-platform';
-  static readonly USER_AGENT: string =
-    'Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36';
+  static readonly ACCEPT: string = 'Accept';
+  static readonly BEARER: string = 'Bearer ';
 }
 
-/** 登录返回码（实测） */
-export class LoginBizCode {
+/** 错误码（本应用自定义，用于 UI 区分处理方式） */
+export class ErrCode {
+  /** 成功 */
   static readonly OK: number = 0;
-  static readonly BAD_CREDENTIAL: number = 2; // PASSWORD_OR_USER_NAME_IS_WRONG
-  static readonly RISK_DEVICE: number = 11; // RISK_DEVICE_DETECTED
-  /** 注册地受限（bundle 内 REGISTER_FROM_MAINLAND=12） */
-  static readonly REGISTER_FROM_MAINLAND: number = 12;
-  /** 该渠道临时停用（bundle 内 TEMP_DISABLED_IN_THIS_CHANNEL=98） */
-  static readonly TEMP_DISABLED: number = 98;
-  /** 未预期错误（bundle 内 UNEXCEPTED_ERROR=99） */
-  static readonly UNEXPECTED: number = 99;
+  /** 网络不可达 / 超时 */
+  static readonly NETWORK: number = -1;
+  /** 密钥无效（HTTP 401/403） */
+  static readonly AUTH: number = -2;
+  /** 余额不足（HTTP 402） */
+  static readonly NO_BALANCE: number = -3;
+  /** 限流（HTTP 429） */
+  static readonly RATE_LIMIT: number = -4;
+  /** 服务端 5xx */
+  static readonly SERVER: number = -5;
+  /** 响应体解析失败（非 JSON / 空体 / HTML） */
+  static readonly BAD_PAYLOAD: number = -6;
+  /** 请求被用户中止 */
+  static readonly ABORTED: number = -7;
+  /** 服务端返回了业务错误（body 里有 error 字段） */
+  static readonly BIZ: number = -8;
 }
 
 /**
- * OAuth 提供方标识
+ * 错误文案（唯一出口）
  *
- * ⚠️ 必须**大写**——实测 `/oauth/get_token` 的 `provider` 取值即为此三串字面量
- *    （bundle 内 `["GOOGLE","APPLE","WECHAT"]`）。
+ * ★ 纪律：**「未配置」「网络失败」「鉴权失败」「余额不足」是四种不同的错误，
+ *   绝不允许复用同一句文案。** 用户要能一眼看出该做什么。
  */
-export class OAuthProvider {
-  static readonly GOOGLE: string = 'GOOGLE';
-  static readonly APPLE: string = 'APPLE';
-  static readonly WECHAT: string = 'WECHAT';
-}
-
-/**
- * `/oauth/get_token` 的失败码（2026-09-19 实测，bundle 内
- * `OAUTH_WECHAT_CALLBACK_ERROR_MESSAGE_CODE`）
- */
-export class OAuthBizCode {
-  static readonly OK: number = 0;
-  /** 授权码 / nonce 失效（已用过或超时）——需重新走一遍扫码 */
-  static readonly SWAP_CODE_INVALID: number = 2;
-  /** 账号被封禁 */
-  static readonly ACCOUNT_BANNED: number = 4;
-  /** 该渠道临时停用 */
-  static readonly TEMP_DISABLED: number = 98;
-  static readonly UNEXPECTED: number = 99;
-}
-
-/**
- * 微信登录相关的「账号绑定」错误码（实测，供未来做绑定/补手机号时用）
- *
- * 注意其中的 `NEED_BIND_MOBILE` —— 微信**首次**登录 DeepSeek 时，
- * 服务端可能要求补绑手机号。UI 必须为此留出分支，
- * 否则用户会看到「什么都没发生」。
- */
-export class WechatBindCode {
-  static readonly WECHAT_NOT_BOUND: number = 3;
-  /** 该手机号已关联过微信 */
-  static readonly MOBILE_ACCOUNT_ALREADY_HAS_WECHAT: number = 5;
-  /** 该微信已绑过手机号 */
-  static readonly WECHAT_ACCOUNT_ALREADY_BOUND_MOBILE: number = 6;
-}
-
-/**
- * 登录请求体里与「设备」相关的字段（**实测必需**）
- *
- * 为什么单独拎出来：
- *   DeepSeek 的登录接口并不是只收 `device_id`。
- *   Web 客户端在登录时会把
- *     `device_name`（主机名）/ `device_model`（机型）/ `token` / `platform`
- *   一并交给服务端，服务端用它们做**设备可信度评分**。
- *   本项目早期只发了 `device_id`，其他字段全缺 ——
- *   风控看到「一个自称 web 的客户端却连设备名都报不出来」，
- *   在部分网络出口（尤其是代理/VPN/共享出口）就判 `RISK_DEVICE_DETECTED`。
- *
- *   实测佐证：同一台手表、同一个 App，换到家庭宽带直连时能登录；
- *   走代理出口时同一份代码稳定被判风险 —— 说明这是
- *   **「请求体缺字段」与「出口 IP 不可信」两个因素叠加**的结果，
- *   补齐字段后容错空间明显变大。
- */
-export class DsDevice {
-  /** 主机名：真机应尽量取设备真实名称，取不到时用这个稳定兜底 */
-  static readonly DEFAULT_NAME: string = 'HarmonyOS Watch';
-  /** 机型 */
-  static readonly DEFAULT_MODEL: string = 'HUAWEI WATCH';
-  /** 客户端平台：本项目走 web 协议栈，必须与 device_id/os 的自称一致 */
-  static readonly PLATFORM: string = 'web';
-}
-
-/**
- * 业务返回码（2026-09-13 用非法 token 实测 fetch_page 得到，见 tools/probe-auth.mjs）
- *
- * ⚠️ 关键结论：**HTTP 状态码恒为 200**，鉴权失败也返回 200，
- *    只能靠响应体里的 `code` 判断。因此任何「用 status 判 401」的写法都不成立。
- */
-export class DsCode {
-  static readonly OK: number = 0;
-  /** 本地合成：网络层异常 / 响应不是 JSON */
-  static readonly LOCAL_NETWORK: number = -1;
-  /** 本地合成：HTTP 通了但响应体不是 JSON（通常是被网关/风控拦成了 HTML） */
-  static readonly LOCAL_BAD_PAYLOAD: number = -2;
-  /** 未携带 token */
-  static readonly MISSING_TOKEN: number = 40002;
-  /** token 失效（过期 / 被顶号 / 服务端注销） */
-  static readonly AUTH_FAILED: number = 40003;
-}
-
-/** 判断某个返回码是否属于「需要重新登录」 */
-export function isAuthCode(code: number): boolean {
-  return code === DsCode.MISSING_TOKEN || code === DsCode.AUTH_FAILED;
-}
-
-/** SSE 事件名 */
-export class SseEvent {
-  static readonly READY: string = 'ready';
-  static readonly UPDATE_SESSION: string = 'update_session';
-  static readonly DELTA: string = 'delta';
-  static readonly HINT: string = 'hint';
-  static readonly TOAST: string = 'toast';
-  static readonly FINISH: string = 'finish';
-  static readonly CLOSE: string = 'close';
-}
-
-/**
- * 消息片段类型（fragment.type）
- *
- * 实测来源：bundle 内 `_COLLAPSIBLE_TYPES: ["THINK","SEARCH","TOOL_SEARCH","TOOL_OPEN","TOOL_FIND"]`
- *          以及 `RESPONSE_TYPES / REQUEST / FILE / TIP / TEMPLATE_RESPONSE`
- *
- * ⚠️ 注意区分两个同名前缀但语义不同的类型：
- *   - `SEARCH`        —— 属于 THINK 之后的「搜索素材整理」阶段，内容是可读文本
- *   - `TOOL_SEARCH`   —— 工具调用，内容是结构化 queries/results（不是纯文本）
- *   - `TOOL_OPEN`     —— 打开链接工具
- * 历史上官网也用过 `TOOL_SEARCH` 传达搜索过程文本，因此解析层对二者都兼容。
- */
-export class FragmentType {
-  static readonly THINK: string = 'THINK';
-  static readonly RESPONSE: string = 'RESPONSE';
-  static readonly TEMPLATE_RESPONSE: string = 'TEMPLATE_RESPONSE';
-  /** 搜索素材整理阶段（可读文本） */
-  static readonly SEARCH: string = 'SEARCH';
-  /** 工具：联网搜索（结构化 queries/results） */
-  static readonly TOOL_SEARCH: string = 'TOOL_SEARCH';
-  /** 工具：打开网页 */
-  static readonly TOOL_OPEN: string = 'TOOL_OPEN';
-  /** 工具：查找 */
-  static readonly TOOL_FIND: string = 'TOOL_FIND';
-}
-
-/**
- * 片段/消息状态（status）
- *
- * 实测来源：bundle 内 MessageStatus 枚举 —— OK 在序列化层映射为 "FINISHED"，
- * 另有 WIP / INCOMPLETE / CONTENT_FILTER / CONTEXT_LENGTH_EXCEEDED / TIMEOUT。
- * 搜索类片段另见 FAILED。
- */
-export class FragStatus {
-  static readonly WIP: string = 'WIP';
-  static readonly FINISHED: string = 'FINISHED';
-  static readonly FAILED: string = 'FAILED';
-  static readonly INCOMPLETE: string = 'INCOMPLETE';
-  static readonly CONTENT_FILTER: string = 'CONTENT_FILTER';
-  static readonly CONTEXT_LENGTH_EXCEEDED: string = 'CONTEXT_LENGTH_EXCEEDED';
-  static readonly TIMEOUT: string = 'TIMEOUT';
-}
-
-/** 角色（服务端用大写） */
-export class Role {
-  static readonly USER: string = 'USER';
-  static readonly ASSISTANT: string = 'ASSISTANT';
-}
-
-/** 服务端模型类型（实测：当前仅 default 可用） */
-export class ModelType {
-  static readonly QUICK: string = 'default'; // 快速模式
-  static readonly EXPERT: string = 'expert'; // 专家模式（当前账号 disabled）
-  static readonly VISION: string = 'vision'; // 识图模式（当前账号 disabled）
+export class ErrMsg {
+  static readonly NETWORK: string = '网络不通，请检查手表 Wi-Fi';
+  static readonly AUTH: string = 'API 密钥无效，请在设置里重新填写';
+  static readonly NO_BALANCE: string = '账户余额不足，请先充值';
+  static readonly RATE_LIMIT: string = '请求太频繁，请稍后再试';
+  static readonly SERVER: string = 'DeepSeek 服务暂时不可用，请稍后重试';
+  static readonly BAD_PAYLOAD: string = '服务端返回了无法识别的数据，请稍后重试';
+  static readonly ABORTED: string = '已停止';
+  static readonly NO_KEY: string = '尚未配置 API 密钥';
 }
