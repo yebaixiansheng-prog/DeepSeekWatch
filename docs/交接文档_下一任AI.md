@@ -7,8 +7,8 @@
 
 ## ⚠️⚠️ 先读这一节：本文档的 v1 部分已过时
 
-**2026-09-30 做了一次推倒重来**：整个应用从「逆向 `chat.deepseek.com` 网页版私有协议」
-改为「调用 `api.deepseek.com` 官方开放平台」。
+**2026-09-30 做了一次推倒重来**：整个应用从「逆向 `<API_HOST>` 网页版私有协议」
+改为「调用 `api.<PROVIDER_DOMAIN>` 官方开放平台」。
 
 **第 1 节之后的所有内容都是 v1 时代的记录**，其中：
 
@@ -38,7 +38,7 @@ v1 的代码已备份到 `legacy_backup/`（**不进 git**），只作回退保�
 | 工程路径 | `D:\HarmonyBuild\DeepSeekWatch` |
 | 包名 | `com.dswatch.round`（穿戴设备 wearable） |
 | 形态 | HarmonyOS 圆形手表 App，**纯 ArkTS/ArkUI**（v2 起无 C++ 模块） |
-| **协议** | **DeepSeek 官方开放平台** `POST https://api.deepseek.com/chat/completions` |
+| **协议** | **DeepSeek 官方开放平台** `POST https://api.<PROVIDER_DOMAIN>/chat/completions` |
 | **鉴权** | **一个 API 密钥**（`Authorization: Bearer`），无登录流程、无 PoW、无风控 |
 | **模型** | `deepseek-flash`（默认）/ `deepseek-v4-pro` |
 | 构建产物 | `entry/build/default/outputs/default/entry-default-signed.hap`（**约 195KB**，v1 是 1.6MB） |

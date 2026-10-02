@@ -21,6 +21,11 @@
 import { Store, Keys } from '../common/Store';
 import { ChatMsg, ToolCall } from './ApiClient';
 import { Role } from '../common/Constants';
+// ★ 只借用**类型**（`import type` 语义）。ArkTS 的 import 是静态的，
+//   虽然这里会建立模块引用，但 `Persona.ets` 只依赖 `Store`，不依赖本文件，
+//   所以**不存在循环依赖**。（注释里说的"反向 import 成环"指运行期调用，
+//   这里是编译期类型，安全。）
+import { Persona } from './Persona';
 
 /** 会话元信息 */
 export interface Session {
@@ -31,6 +36,22 @@ export interface Session {
   /** 最近更新时间 ms */
   updatedAt: number;
   messages: ChatMsg[];
+  /**
+   * 绑定的人设 id
+   *
+   * ★ 空串 = 未绑定（不注入任何 system prompt）。
+   *
+   * ★ 为什么用空串而不是 `undefined` / `null`：
+   *   · 这份结构要 JSON 往返，空串天然可序列化，`undefined` 会**整个键消失**；
+   *   · 老会话（升级前存的）读回来没有这个字段，
+   *     `str(o['personaId'])` 得到空串 —— **自动向前兼容**，
+   *     不会因为多了个字段就读不出来。
+   *
+   * ★ 人设是**每个对话独立绑定**的（用户明确选择），对话建立后不可改：
+   *   绑在会话上而不是全局设置上 —— 否则改一次人设会追溯影响历史对话，
+   *   用户会觉得「我以前的回答怎么变了」。
+   */
+  personaId: string;
 }
 
 /** 发送给 API 时的裁剪上限 */
@@ -47,6 +68,17 @@ interface SessionIndexEntry {
   createdAt: number;
   updatedAt: number;
   count: number;
+  /**
+   * ★ 绑定的人设 id（2026-10-03 新增）
+   *
+   * 为什么要**冗余**存进索引（消息体里已经有一份）：
+   *   历史对话页要在**不加载任何消息体**的前提下显示「这条对话用了什么人设」。
+   *   否则打开列表页就得把最多 30 条会话的 JSON 全读一遍 ——
+   *   在手表上是几百毫秒的卡顿，而且完全没必要。
+   *
+   * 老索引没有这个键 → `str(o['personaId'])` 得空串 → 向前兼容。
+   */
+  personaId: string;
 }
 
 export class ChatStore {
@@ -71,7 +103,9 @@ export class ChatStore {
               title: str(o['title']),
               createdAt: num(o['createdAt']),
               updatedAt: num(o['updatedAt']),
-              count: num(o['count'])
+              count: num(o['count']),
+              // ★ 老索引没这个键 → 空串（向前兼容，不会因为多字段读不出整条索引）
+              personaId: str(o['personaId'])
             });
           }
         }
@@ -85,12 +119,34 @@ export class ChatStore {
     return ChatStore.cache;
   }
 
+  /** 读该写索引（内部） */
   private static async saveIndex(): Promise<void> {
     await Store.put(Keys.SESSION_INDEX, JSON.stringify(ChatStore.cache));
   }
 
+  /**
+   * ★ 强制清索引缓存（2026-10-03 新增）
+   *
+   * 为什么需要：`index()` 有内存缓存（`loaded` 标志）。
+   * 会话列表页跨页返回时，如果别处已经改过索引（例如对话页保存了新消息），
+   * 列表页拿到的还是**上一份快照** —— 表现为「刚聊完的对话，回历史列表
+   * 看到的还是旧标题/旧条数」，用户会以为消息没发出去。
+   *
+   * ★ 这与 `PersonaStore.invalidate()` 是同一个模式：
+   *   「内存缓存 + 明确的失效出口」，而不是让每个调用点自己想办法绕过缓存。
+   */
+  static invalidate(): void {
+    ChatStore.loaded = false;
+  }
+
   /** 新建会话，返回会话对象 */
-  static async create(): Promise<Session> {
+  /**
+   * 新建会话，返回会话对象
+   *
+   * @param personaId 绑定的人设 id；空串表示不绑定（见 `Session.personaId`）。
+   *                  默认空串 —— 保证所有旧调用点不用改也能编译。
+   */
+  static async create(personaId: string = ''): Promise<Session> {
     const id: string = 's' + Date.now().toString();
     const now: number = Date.now();
     const s: Session = {
@@ -98,7 +154,8 @@ export class ChatStore {
       title: '新对话',
       createdAt: now,
       updatedAt: now,
-      messages: []
+      messages: [],
+      personaId: personaId
     };
     await ChatStore.save(s);
     return s;
@@ -124,7 +181,9 @@ export class ChatStore {
         title: str(o['title']),
         createdAt: num(o['createdAt']),
         updatedAt: num(o['updatedAt']),
-        messages: msgs
+        messages: msgs,
+        // ★ 老会话没有这个键 → str() 返回空串 → 自动向前兼容
+        personaId: str(o['personaId'])
       };
     } catch (e) {
       return null;
@@ -152,6 +211,7 @@ export class ChatStore {
         e.title = s.title;
         e.updatedAt = s.updatedAt;
         e.count = s.messages.length;
+        e.personaId = s.personaId;
         found = true;
         break;
       }
@@ -162,7 +222,8 @@ export class ChatStore {
         title: s.title,
         createdAt: s.createdAt,
         updatedAt: s.updatedAt,
-        count: s.messages.length
+        count: s.messages.length,
+        personaId: s.personaId
       });
     }
     // 索引排序：最近更新在前
@@ -173,6 +234,42 @@ export class ChatStore {
       await Store.remove(ChatStore.msgKey(drop.id));
     }
     await ChatStore.saveIndex();
+  }
+
+  /**
+   * ★ 重设会话绑定的人设（2026-10-03 新增）
+   *
+   * ## 为什么允许改绑（与「每对话独立绑定」并不矛盾）
+   *
+   * 用户明确选的是「每个对话独立绑定」——**绑定的粒度**是对话，
+   * 不是"建好就焊死"。真实场景：
+   *   · 一条对话聊到一半，发现当前人设不合适，想换一个；
+   *   · 用户在会话里用人设做临时「角色扮演」。
+   *
+   * ★ 但这里刻意**不清空历史消息**。理由：
+   *   人设是「发送时附加的包装层」（见 ChatPage.doSend 的顺序纪律），
+   *   历史消息本身没被人设改写过，所以换人设只是换了个说话的人，
+   *   之前的对话记录依然是有意义的事实。
+   *   若清空历史，用户只会觉得「换个人设把我聊天记录弄没了」。
+   *
+   * ★ 什么时候**必须**开新对话：见 `needsFreshSession`。
+   *   某些人设的内容与已有历史直接冲突（例如历史是「资深工程师」口吻，
+   *   现在要换成「幼儿园老师」），继续续写会让模型精神分裂。
+   *   那种情况由 UI 提示用户，**不在这里偷偷清空**。
+   *
+   * @returns 是否真的改了（同一个 id 或无此会话 → false）
+   */
+  static async setPersona(id: string, personaId: string): Promise<boolean> {
+    const s: Session | null = await ChatStore.load(id);
+    if (s === null) {
+      return false;
+    }
+    if (s.personaId === personaId) {
+      return false;
+    }
+    s.personaId = personaId;
+    await ChatStore.save(s);
+    return true;
   }
 
   /** 删除会话 */
@@ -239,6 +336,7 @@ export class ChatStore {
       arr.push(ChatStore.encodeMsg(m));
     }
     out['messages'] = arr;
+    out['personaId'] = s.personaId;
     return out;
   }
 
@@ -300,6 +398,107 @@ export class ChatStore {
   }
 }
 
+// ========================================================================
+//  人设相关的纯函数（不依赖存储，离线测试直接跑）
+// ========================================================================
+
+/**
+ * 本地「人设是否没填任何内容」判定
+ *
+ * 四个设定字段全空 = 这条人设实际上什么都没约束。
+ * 注意**不含名称**：只有名字的人设仍然是有意义的（模型会按名字自我定位），
+ * 所以「名称填了、四字段全空」不算空白。
+ *
+ * ★ 为什么不直接 import `Persona.isBlank`：
+ *   `ChatStore` 是底层存储模块，`Persona` 依赖它（而不是反过来）。
+ *   反向 import 会成环。这四行重复的代价远小于一个循环依赖。
+ */
+export function isBlankPersona(p: Persona): boolean {
+  return p.personality.trim().length === 0
+    && p.background.trim().length === 0
+    && p.tone.trim().length === 0
+    && p.replyStyle.trim().length === 0;
+}
+
+/**
+ * 人设的展示名（列表页/对话页顶部用）
+ *
+ * @returns 空串表示未绑定 —— 调用方据此决定要不要渲染那一行，
+ *          **不要**在这里返回「未绑定」之类的文案：
+ *          那样调用方就没法区分「没人设」和「人设叫未绑定」。
+ */
+export function personaBadge(p: Persona | null): string {
+  if (p === null) {
+    return '';
+  }
+  const n: string = p.name.trim();
+  return n.length > 0 ? n : '未命名人设';
+}
+
+/**
+ * ★ 换人设时是否**建议**开新对话（纯函数，只给 UI 做提示用）
+ *
+ * 判据不是「人设不同」，而是「新老两边**都填了设定**且不同」：
+ *   · 原来没绑 → 现在绑上：历史是"素人"回答，加上人设正好是升级，直接续写没问题；
+ *   · 原来绑 A → 换成空白人设：约束被解除，模型顺着历史继续答也不违和；
+ *   · A → B 且两边都有内容：历史里已经有**一段带 A 口吻的回答**，
+ *     模型会拿它当风格样本，与 B 打架 —— 这才是真需要开新对话的情况。
+ *
+ * ★ 这个函数只返回「建议」，**绝不清空任何东西**。
+ *   清空是不可逆操作，必须由用户明确点击确认。
+ */
+export function needsFreshSession(oldP: Persona | null, newP: Persona | null): boolean {
+  if (oldP === null || newP === null) {
+    return false;
+  }
+  if (oldP.id === newP.id) {
+    return false;
+  }
+  return !isBlankPersona(oldP) && !isBlankPersona(newP);
+}
+
+/**
+ * ★★ 人设生效的唯一注入点（2026-10-03）
+ *
+ * 在消息序列**最前面**插入一条 system 消息，内容是 `buildSystemPrompt` 的产物。
+ *
+ * ## 三条纪律
+ *
+ * 1. **必须先 `trimForSend` 再调用本函数。**
+ *    顺序反了虽然当前实现下结果相同（`trimForSend` 规则 1 让 system 不占配额），
+ *    但那依赖 trim 的内部实现细节；先裁后注入不依赖任何细节。
+ *    见 `tools/persona-round-test.mjs` 第 9 组。
+ *
+ * 2. **空 prompt 什么都不做**（不插空 system）。
+ *    这条保证「未绑定人设的老会话」行为与升级前**逐字节一致** ——
+ *    服务端看到的请求体没有任何变化。
+ *
+ * 3. **不改入参**，返回新数组。
+ *    入参 `msgs` 可能直接来自 `@State` 持有的数据，原地改会引发渲染问题，
+ *    而且调用方可能还要拿原数组做别的事。
+ *
+ * ## 为什么是「插入」而不是「替换已有的 system」
+ *
+ * 本工程的消息序列里 system 只由本函数产生，不存在「用户自己写的 system」。
+ * 选择插入而非替换，是为了**不静默吃掉**任何东西 ——
+ * 万一将来别处也往序列里放了 system，宁可让它留在那里（服务端能接受多条），
+ * 也不要在这里悄悄删掉别人的内容。
+ *
+ * @param msgs   已裁剪好的消息列表（真实对话）
+ * @param prompt system 内容；空白串则不注入
+ * @returns 新数组（可能含新加的 system，也可能是原内容的浅拷贝）
+ */
+export function injectSystem(msgs: ChatMsg[], prompt: string): ChatMsg[] {
+  const out: ChatMsg[] = [];
+  if (prompt.trim().length > 0) {
+    out.push({ role: Role.SYSTEM, content: prompt, ts: Date.now() });
+  }
+  for (const m of msgs) {
+    out.push(m);
+  }
+  return out;
+}
+
 /**
  * ★ 裁剪消息用于发送
  *
@@ -323,8 +522,7 @@ export class ChatStore {
  *   现在改成显式扫描 + 独立的 `isSendableSequence` 校验，
  *   并把校验器也用于测试断言，保证「执行过」而不是「碰巧没触发」。
  */
-export function trimForSend(msgs: ChatMsg[], max: number = MAX_SEND_MSGS): ChatMsg[] {
-  if (msgs.length <= max) {
+export function trimForSend(msgs: ChatMsg[], max: number = MAX_SEND_MSGS): ChatMsg[] {  if (msgs.length <= max) {
     // 即使不裁剪，也可能本身就是非法序列（如工具结果还没回来的中间态）
     return msgs.slice(0);
   }

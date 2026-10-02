@@ -168,4 +168,24 @@ export class Keys {
   static readonly SESSION_INDEX: string = 'session_index';
   /** 最近打开的会话 id */
   static readonly LAST_SESSION: string = 'last_session_id';
+  /**
+   * ★ 人设列表 JSON（2026-10-03 新增）
+   *   存法与会话一致：整个列表序列化成一个字符串。
+   *   人设数量上限 20（MAX_PERSONAS），最坏情况约 20 × 1KB = 20KB，
+   *   远低于 Preferences 单值的建议上限（32KB），安全。
+   */
+  static readonly PERSONA_LIST: string = 'persona_list';
+  /** 上次新建对话所选的人设 id（作为下次新建的默认选中项） */
+  static readonly LAST_PERSONA: string = 'last_persona_id';
+  /**
+   * ★ 跨页回传：人设选择页选中的 id（2026-10-03）
+   *
+   * 为什么需要它：ArkUI 的 `router.back()` **不支持携带参数**，
+   * 想把「用户在人设页选了什么」带回上一页，只能走
+   * 「写一个约定 key → 对方 aboutToAppear 读走并**立刻清掉**」。
+   *
+   * ⚠️ 「立刻清掉」是必须的：不清的话，用户下次进对话页会**再次**
+   *    应用上次的选择 —— 表现为「明明没选，人设却自己变了」。
+   */
+  static readonly PENDING_PERSONA: string = 'pending_persona_id';
 }

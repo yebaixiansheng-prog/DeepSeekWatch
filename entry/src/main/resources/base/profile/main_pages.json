@@ -2,6 +2,8 @@
   "src": [
     "pages/Index",
     "pages/ChatPage",
-    "pages/SessionsPage"
+    "pages/SessionsPage",
+    "pages/SettingsPage",
+    "pages/PersonaPage"
   ]
 }

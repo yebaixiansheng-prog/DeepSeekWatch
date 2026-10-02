@@ -61,12 +61,68 @@ const RULES = [
   // ---- 5. 函数参数类型标注：`(a: T, b: U)` 与 `(a: T)` ----
   //    只在 **参数列表** 内替换：匹配 `( ... )` 且内部没有 `=>` 和 `?`（排除三元）
   //    这里用两轮：先处理最常见的「标识符: 类型」后跟 , 或 ) 或 = 的形式
-  [/([\(,]\s*)([A-Za-z_$][\w$]*)\s*:\s*[A-Za-z_$][\w$.]*(?:<[^;{}()]*>)?(?:\[\])?(?:\s*\|\s*(?:null|undefined|[A-Za-z_$][\w$.]*(?:<[^;{}()]*>)?(?:\[\])?))*\s*(?=[,\)])/g,
+  //
+  //    ★★ 这段的空白处理是本文件最微妙的地方（2026-10-03 反复踩了三次）：
+  //
+  //    ① **不允许跨行**（全用 `[ \t]*`）→ 多行参数列表里
+  //       `round: number, handle: http.HttpRequest` 这种**换行续写**的参数
+  //       匹配不到，类型残留 → `Unexpected token ':'`。
+  //    ② **允许跨行**（用 `\s*`）→ `([\(,]\s*)` 会越过换行去抓
+  //       **上一行末尾的逗号**，把下一行整行吃掉（规则 6 的坑）。
+  //
+  //    真正的分界是**「冒号后面跟的是什么」**：
+  //    · 参数列表里，冒号后面一定是**类型名**（大写开头的标识符/泛型/数组）；
+  //    · 被误伤时，冒号后面是**表达式的值**（小写变量、字符串、三元）。
+  //    所以这里把「类型」约束成 **必须大写字母开头**，同时允许跨行。
+  //    这样既认得出多行参数，又不会把 `name: key === A ? v : p.name` 吃掉
+  //    （`key` 是小写，不匹配）。
+  //
+  //    ★ 为什么敢用「大写开头 = 类型」这个约定：
+  //      这是 TypeScript 社区的通行写法，本工程也全程遵守；
+  //      而且**万一认错了也只是漏剥一个类型**，会立刻被语法自检拦下，
+  //      不会静默生成错误代码（宁可报错不可静默出错）。
+  [/([\(,])\s*([A-Za-z_$][\w$]*)\s*:\s*[A-Z][\w$.]*(?:<[^;{}()<>]*>)?(?:\[\])?(?:\s*\|\s*(?:null|undefined|[A-Z][\w$.]*(?:<[^;{}()<>]*>)?(?:\[\])?))*\s*(?=[,\)])/g,
+    '$1$2'],
+
+  // ---- 5b. 参数列表里的**其他常见类型**也要剥 ----
+  //    上面那条为防误伤要求类型名大写开头，但下面两类不满足：
+  //      · 内置基本类型：`n: number` / `s: string` / `b: boolean` / `: void`
+  //      · **命名空间限定的平台类型**：`h: http.HttpRequest`（小写开头！）
+  //        —— 这是 HarmonyOS 的写法，`http` 是模块名不是类型名。
+  //    所以这里显式枚举这些形态，**仍然只在紧跟 `,` 或 `)` 的上下文**生效。
+  //
+  //    ★ 为什么不会被 `name: key === A ? v : p.name,` 误伤：
+  //      这条规则的「类型」部分必须是**枚举里列出的那几种字面形态**
+  //      （number/string/... 或 `http.X`/`util.X` 这样的限定名），
+  //      `key` 不在枚举里，`===` 也不在，所以匹配不上。
+  //      也就是说：**白名单比黑名单安全** —— 宁可漏剥（会被语法自检拦下），
+  //      也不要用一个宽泛的 `[A-Za-z_$][\w$.]*` 去猜（会吃真代码）。
+  //
+  //    ★ 数组后缀 `[]` 必须支持：`out: string[]` —— 漏了它就会残留
+  //      `function appendSeg(out: string[], label, value)`（真实踩过）。
+  [/([\(,])\s*([A-Za-z_$][\w$]*)\s*:\s*(?:number|string|boolean|void|any|unknown|never|object|Object|Function|symbol|bigint|http\.[A-Za-z_$][\w$]*|util\.[A-Za-z_$][\w$]*|window\.[A-Za-z_$][\w$]*)(?:\[\])*\s*(?=[,\)])/g,
     '$1$2'],
 
   // ---- 6. 带默认值的参数：`a: T = v` ----
-  [/([\(,]\s*)([A-Za-z_$][\w$]*)\s*:\s*[A-Za-z_$][\w$.]*(?:<[^;{}()]*>)?(?:\[\])?(?:\s*\|\s*(?:null|undefined|[A-Za-z_$][\w$.]*(?:<[^;{}()]*>)?(?:\[\])?))*\s*=/g,
+  //    ★★ 这条规则是最容易误伤的一条，出过一个极隐蔽的错（2026-10-03）：
+  //       对象字面量属性写成 `name: key === A ? v : p.name,` 时，
+  //       `([\(,]\s*)` 匹配了**上一行末尾的逗号 + 换行缩进**，
+  //       `[A-Za-z_$][\w$.]*` 匹配到 `key`，`\s*=` 匹配了 `===` 的**第一个等号**，
+  //       于是整段被吃成 `name =`，剩下 `== A ? ...` → 生成非法代码
+  //       `name === ...`（报错信息是 `Unexpected token '==='`，看着像别处的问题）。
+  //       修法：`=` 后面必须**不是** `=` / `>`。
+  //    ★★ 同样的坑在规则 10 的第二条里也有，一并加了同样的保护。
+  [/([\(,])[ \t]*([A-Za-z_$][\w$]*)[ \t]*:[ \t]*[A-Za-z_$][\w$.]*(?:<[^;{}()]*>)?(?:\[\])?(?:[ \t]*\|[ \t]*(?:null|undefined|[A-Za-z_$][\w$.]*(?:<[^;{}()]*>)?(?:\[\])?))*[ \t]*=(?!=|>)/g,
     '$1$2 ='],
+
+  // ---- 6b. 带修饰符的类字段 `static NAME: string = 'x';` / `static x: T;` ----
+  //    ★ 原有规则 10 的 `^(\s*)([A-Za-z_$]\w*)` 只能匹配「行首就是字段名」，
+  //      加了 `static`（或规则 1 删除 private/public 后残留的 static）就匹配不到，
+  //      于是 `static NAME: string = 'name';` 原样留下 → Node 报
+  //      `Unexpected strict mode reserved word`（看着像 static 的问题，其实是类型没剥掉）。
+  //      这里补一条显式处理「修饰符 + 字段名 + 类型」的规则。
+  [/^([ \t]*)static[ \t]+([A-Za-z_$][\w$]*)[ \t]*:[ \t]*[A-Za-z_$][\w$.]*(?:<[^;{}()]*>)?(?:\[\])?(?:[ \t]*\|[ \t]*(?:null|undefined|[A-Za-z_$][\w$.]*(?:<[^;{}()]*>)?(?:\[\])?))*[ \t]*(=|;)/gm,
+    '$1static $2 $3'],
 
   // ---- 7. 可选参数 `a?: T` → `a` ----
   [/([\(,]\s*)([A-Za-z_$][\w$]*)\s*\?\s*:/g, '$1$2'],
@@ -80,9 +136,22 @@ const RULES = [
     ') =>'],
 
   // ---- 10. 属性声明：类字段 `name: T = v;` / `name: T;` ----
-  [/^(\s*)([A-Za-z_$][\w$]*)\s*:\s*[A-Za-z_$][\w$.]*(?:<[^;{}()]*>)?(?:\[\])?(?:\s*\|\s*(?:null|undefined|[A-Za-z_$][\w$.]*(?:<[^;{}()]*>)?(?:\[\])?))*\s*;/gm,
+  //    ★★ 这里有个极隐蔽的坑（2026-10-03）：末尾用 `\s*;` 会**跨行**匹配 ——
+  //       `\s` 包含换行，于是对象字面量里 `createdAt: p.createdAt,` 会因为
+  //       后面某行有 `};` 而被整段吃掉（从 `createdAt:` 一路吞到那个分号），
+  //       生成 `createdAt,` 这种「看着像简写属性、实际变量未定义」的代码。
+  //       它**语法合法**，所以能通过自检，只在运行时炸 `ReferenceError`。
+  //       修法：行内空白用 `[ \t]*`，绝不用 `\s*`。
+  [/^([ \t]*)([A-Za-z_$][\w$]*)[ \t]*:[ \t]*[A-Za-z_$][\w$.]*(?:<[^;{}()]*>)?(?:\[\])?(?:[ \t]*\|[ \t]*(?:null|undefined|[A-Za-z_$][\w$.]*(?:<[^;{}()]*>)?(?:\[\])?))*[ \t]*;[ \t]*$/gm,
     '$1$2;'],
-  [/^(\s*)([A-Za-z_$][\w$]*)\s*:\s*[A-Za-z_$][\w$.]*(?:<[^;{}()]*>)?(?:\[\])?(?:\s*\|\s*(?:null|undefined|[A-Za-z_$][\w$.]*(?:<[^;{}()]*>)?(?:\[\])?))*\s*=/gm,
+  //    ★★ 这条规则出过一个很隐蔽的错（2026-10-03）：
+  //       对象字面量属性 `name: key === A ? v : p.name,`
+  //       里，类型部分 `[A-Za-z_$][\w$.]*` 匹配到 `key`，
+  //       接着 `\s*=` 匹配了 `===` 的**第一个等号**，于是整段被替换成 `name =`，
+  //       剩下 `== A ? ...` —— 生成 `name === ... ? ` 这种非法代码。
+  //       表面报错是 `Unexpected token '==='`，但真凶是这条规则。
+  //       修法：`=` 后面必须**不是** `=`（排除 == / ===），也不是 `>`（排除 =>）。
+  [/^(\s*)([A-Za-z_$][\w$]*)\s*:\s*[A-Za-z_$][\w$.]*(?:<[^;{}()]*>)?(?:\[\])?(?:\s*\|\s*(?:null|undefined|[A-Za-z_$][\w$.]*(?:<[^;{}()]*>)?(?:\[\])?))*\s*=(?!=|>)/gm,
     '$1$2 ='],
 
   // ---- 11. 类型断言 `as T`（含联合与泛型） ----
@@ -103,6 +172,30 @@ const RULES = [
   [/^export\s+interface\s+\w+[\s\S]*?\n\}/gm, ''],
   [/^interface\s+\w+[\s\S]*?\n\}/gm, ''],
   [/^export\s+type\s+\w+\s*=[\s\S]*?;\s*$/gm, ''],
+
+  // ---- 12b. enum → 对象字面量 ----
+  //    ★ `enum` 在严格模式 / `new Function` 里是非法的（不是标准 JS），
+  //      所以必须转掉。这里只处理「数值成员」这种本工程实际用到的形态，
+  //      用 TS 的**双向映射**语义（既 X.A = 0，也 X[0] = 'A'）。
+  //      不支持的写法（字符串成员、计算成员）会保持原样，
+  //      随后被规则 13 的语法自检拦下 —— 宁可报错也不静默测错东西。
+  [/^(\s*)(?:export\s+)?enum\s+(\w+)\s*\{([^}]*)\}/gm, (m, indent, name, body) => {
+    const members = [];
+    const rev = [];
+    let auto = 0;
+    for (const raw of body.split(',')) {
+      const t = raw.trim();
+      if (t.length === 0) continue;
+      const mm = /^([A-Za-z_$][\w$]*)\s*(?:=\s*(-?\d+))?$/.exec(t);
+      if (!mm) return m;   // 不认识的写法：原样保留，交给语法自检报错
+      const key = mm[1];
+      const val = mm[2] !== undefined ? parseInt(mm[2], 10) : auto;
+      auto = val + 1;
+      members.push(key + ': ' + val);
+      rev.push(val + ": '" + key + "'");
+    }
+    return indent + 'const ' + name + ' = { ' + members.concat(rev).join(', ') + ' };';
+  }],
 
   // ---- 13. export 关键字（统一在末尾手动导出） ----
   [/^export\s+/gm, ''],
@@ -136,7 +229,22 @@ export function extractBlock(src, header) {
   //    绝不能靠 `head.includes('=')` —— 函数签名里的**默认参数**
   //    （`max: number = 24`）也会命中，会把整个函数体丢掉。
   const isConstLike = /^\s*(export\s+)?(const|type|enum)\b/.test(head);
-  if (braceAt < 0 || isConstLike) {
+  // ★ enum 有**块结构**，不能像 const/type 那样只取到行尾
+  //   （截断会得到 `enum X {` 这种半截代码）。它在规则 12b 里会被
+  //   转成等价的对象字面量，所以这里要按大括号配平摘完整。
+  const isEnum = /^\s*(export\s+)?enum\b/.test(head);
+  if (braceAt < 0 || (isConstLike && !isEnum)) {
+    // ★ 数组/对象字面量的常量会跨多行（如 `const PERSONA_FIELDS = [ {...}, ... ];`）。
+    //   只取到行尾会截出一个语法非法的片段。所以：
+    //   若等号后紧跟 `[` 或 `{`，按方括号/大括号配平取到配平的右括号。
+    const eq = src.indexOf('=', at);
+    if (eq >= 0 && eq < braceAt) {
+      let j = eq + 1;
+      while (j < src.length && /\s/.test(src[j])) j++;
+      if (src[j] === '[') {
+        return src.substring(at, matchBracket(src, j, '[', ']') + 1);
+      }
+    }
     const eol = src.indexOf('\n', at);
     return stripLineComments(src.substring(at, eol < 0 ? src.length : eol));
   }
@@ -187,6 +295,46 @@ function stripLineComments(s) {
 }
 
 /**
+ * 从 src[start]（应为 open 字符）起做配平，返回匹配的闭合字符下标
+ *
+ * ★ 同样必须跳过注释与字符串 —— 否则数组字面量里的
+ *   `'['`（提示语、正则、示例文本里很常见）会让配平走偏。
+ */
+function matchBracket(src, start, open, close) {
+  let depth = 0;
+  let inBlock = false;
+  let inLine = false;
+  let inStr = '';
+  for (let i = start; i < src.length; i++) {
+    const c = src[i];
+    const n = src[i + 1];
+    if (inLine) {
+      if (c === '\n') inLine = false;
+      continue;
+    }
+    if (inBlock) {
+      if (c === '*' && n === '/') { inBlock = false; i++; }
+      continue;
+    }
+    if (inStr !== '') {
+      if (c === '\\') { i++; continue; }
+      if (c === inStr) inStr = '';
+      continue;
+    }
+    if (c === '/' && n === '/') { inLine = true; i++; continue; }
+    if (c === '/' && n === '*') { inBlock = true; i++; continue; }
+    if (c === '"' || c === '\'' || c === '`') { inStr = c; continue; }
+
+    if (c === open) depth++;
+    else if (c === close) {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  throw new Error('方括号配平失败（起点 ' + start + '）');
+}
+
+/**
  * 加载一个 .ets 文件的若干块
  *
  * @param {string} relPath        相对 entry/src/main/ets 的路径
@@ -215,10 +363,18 @@ export async function loadEts(relPath, blocks, prelude = '', extraExports = []) 
     if (b.startsWith('export class ')) names.push(b.substring(13).split(/[\s{]/)[0].trim());
     else if (b.startsWith('export function ')) names.push(b.substring(16).split('(')[0].trim());
     else if (b.startsWith('export const ')) names.push(b.substring(13).split(/[=:]/)[0].trim());
+    else if (b.startsWith('export enum ')) names.push(b.substring(12).split(/[\s{]/)[0].trim());
   }
   for (const e of extraExports) names.push(e);
 
-  const full = js + '\nexport { ' + names.join(', ') + ' };\n';
+  // ★ 去重：extraExports 里常常会把已在 blocks 里的名字再写一遍
+  //   （比如为了拿到 enum 的运行时值），重复导出会让模块直接语法非法。
+  const uniq = [];
+  for (const n of names) {
+    if (n.length > 0 && !uniq.includes(n)) uniq.push(n);
+  }
+
+  const full = js + '\nexport { ' + uniq.join(', ') + ' };\n';
 
   // ★ 语法自检：剥离错了必须**立刻报错**，绝不把变异过的副本喂给测试
   try {
